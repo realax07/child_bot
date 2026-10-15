@@ -1,0 +1,102 @@
+name: flow
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # P0.5: полный набор тестов Flow Control (включая негативные сценарии
+  # P0.2–P0.4) в обычном PR CI. Задача Заказчика — включить этот job в
+  # required checks ruleset, тогда он станет обязательным для merge.
+  test-flow-control:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      # GITHUB_EVENT_PATH удаляется на уровне процесса (env -u): Actions
+      # всегда указывает эту переменную, а pr_validate/gate_runner трактуют
+      # её наличие как «PR-контекст есть» — тогда негативные тесты
+      # (SKIPPED без PR-контекста, tests/test_gate_runner.py) получают
+      # FAIL вместо SKIPPED. Локально переменной нет — тесты зеленые.
+      - name: Run tests
+        run: env -u GITHUB_EVENT_PATH python -m pytest tests/ -q
+
+      # pm_bounds_check (J9/J10) НЕ в CI: требует реестра сессий
+      # (~/.hermes/state/active_sessions.json), которого на раннере нет —
+      # консервативная ветка дает ложный FAIL. Гейт локальный (приемка).
+
+  flow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install OpenSpec CLI
+        run: npm install -g @fission-ai/openspec@1.14.0
+
+      - name: Validate specs (strict)
+        run: openspec validate --all --strict
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Flow check
+        run: python3 scripts/flow_check.py .
+
+      - name: PR artifact validation (I3/I4, J6; code-review gate J10)
+        if: github.event_name == 'pull_request'
+        run: |
+          PR_TEXT="$(cat "$GITHUB_EVENT_PATH" | python3 -c "import json,sys; d=json.load(sys.stdin); pr=d.get('pull_request',{}); print(pr.get('title','')+' '+(pr.get('body') or ''))")"
+          # J10: PR по change-маркеру обязан иметь code-reviews/<change-id>/ с
+          # approve-вердиктами задач из дифа — проверяет pr_validate.py (check_change).
+          # Задачи берутся из ветки PR (GITHUB_HEAD_REF) и title/body.
+          # Контекст диффа для [chore]/[docs]/[ops]-чекеров (env-конвенция
+          # pr_validate): трогает ли PR активные спеки / код продукта.
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep '^openspec/changes/' | grep -vq '^openspec/changes/archive/'; then
+            export PR_CHANGED_SPECS=1
+          fi
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -qE '^(backend|frontend|services|src|e2e)/'; then
+            export PR_CHANGED_CODE=1
+          fi
+          # J26: deploy-дифф (deploy/**, RUNBOOK.md) без [ops]-маркера в PR = FAIL.
+          # Деплой-инфраструктура — зона devops-роли; ПМ/dev-PR с deploy-файлами
+          # обязан идти как [ops] (девопс-делегация) — большинство наших ошибок
+          # происходило на деплое (Р4/6.3 nginx-аватары, уроки прод-выкаток).
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -qE '^(deploy/|RUNBOOK\.md$)'; then
+            export PR_CHANGED_DEPLOY=1
+          fi
+          # J50: UI-дельта (frontend/**, services/*/frontend/) и web-тесты
+          # (tests/web/*.py) в дифе. Ворота «UI-дельта + макеты (design/**)
+          # ⇒ web-тесты или [no-ui-tests] + основание» — check_ui_tests_gate
+          # в pr_validate.py.
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -qE '^(frontend/|services/[^/]+/frontend/)'; then
+            export PR_CHANGED_UI=1
+          fi
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep -qE '^tests/web/.*\.py$'; then
+            export PR_CHANGED_WEBTESTS=1
+          fi
+          if ! python3 scripts/pr_validate.py . --id "$PR_TEXT"; then
+            echo "::error::pr_validate: обязательные артефакты отсутствуют (см. выше)"
+            exit 1
+          fi
+
+# Примечание (P0.5): job test-flow-control (pytest tests/) НЕ зависит от job flow —
+# pytest независим от flow_check. На момент этого изменения flow_check на main
+# красный из-за 5 самоссылочных ошибок пакета add-deterministic-flow (гигиена P0.6,
+# вне рамок P0.5), поэтому PR могут оставаться красными из-за соседнего job flow —
+# это ожидаемо и не связано с тестами.

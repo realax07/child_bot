@@ -72,14 +72,18 @@ Usage:
         [--registry PATH] [--state PATH]
     flowctl.py reconcile [--repo PATH] [--delegation-id ID]
         [--registry PATH] [--state PATH] [--audit PATH] [--json]
+    flowctl.py regress --change C [--repo PATH] [--base REF] [--final]
+        [--timeout SEC] [--json]
 
-Exit codes: 0 — успех/ALLOW/accepted (run/prepare — разрешено);
-1 — DENY/STALE_SNAPSHOT/returned; 2 — UNKNOWN/ошибка входа/blocked.
+Exit codes: 0 — успех/ALLOW/accepted (run/prepare — разрешено; regress —
+PASS); 1 — DENY/STALE_SNAPSHOT/returned (regress — FAIL); 2 — UNKNOWN/ошибка
+входа/blocked.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import uuid
@@ -540,7 +544,13 @@ def cmd_prepare(args) -> int:
 
     # 5) Worktree (реальный side effect — до reservation, чтобы записать путь;
     #    при отказе reservation worktree НЕ удаляется молча — разбор ПМ).
+    #    J51.1 (worktree-per-delegation), деградация: если git worktree
+    #    недоступен (session_worktree.sh вернул ошибку), делегация НЕ
+    #    проваливается — ALLOW с WARN (warnings в payload/записи, worktree
+    #    None, работа в общем дереве repo). FAIL был бы ложным блокером
+    #    параллельной работы; деградация честно видна в ALLOW-объекте.
     worktree = None
+    worktree_warning = None
     if args.worktree:
         worktree = str(Path(args.worktree).resolve())
         if sc.git_toplevel(Path(worktree)) is None:
@@ -555,10 +565,16 @@ def cmd_prepare(args) -> int:
             capture_output=True, text=True,
         )
         if proc.returncode != 0:
-            print(f"FLOWCTL-ERROR: worktree не создан: {proc.stderr.strip()}",
-                  file=sys.stderr)
-            return 2
-        worktree = proc.stdout.strip().splitlines()[-1]
+            worktree_warning = (
+                "WORKTREE_UNAVAILABLE: git worktree не создан "
+                f"({proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'без диагностики'})"
+                f" — делегация работает в общем дереве {repo} "
+                "(деградация J51.1: WARN в ALLOW, не FAIL; при параллельных "
+                "делегациях того же repo энфорсер требует разные worktree)")
+            print(f"FLOWCTL-WARNING: {worktree_warning}", file=sys.stderr)
+        else:
+            worktree = proc.stdout.strip().splitlines()[-1]
+    warnings = [worktree_warning] if worktree_warning else []
 
     # 6) Атомарная reservation зоны (поставка 04).
     base_tree = Path(worktree) if worktree else repo
@@ -655,6 +671,7 @@ def cmd_prepare(args) -> int:
         "requested_zones": zp["requested"],
         "zone_violations": policy_violations,
         "worktree": worktree,
+        "warnings": warnings,
         "branch": args.branch,
         "goal_path": str(goal_path),
         "registry": str(registry_path),
@@ -684,11 +701,13 @@ def cmd_prepare(args) -> int:
         "schema_version": OUTPUT_SCHEMA, "command": "prepare",
         "correlation_id": correlation, "prepared": True,
         "idempotent": bool(res.get("idempotent")), "adapter": ADAPTER,
+        "warnings": warnings,
         "record": record, "reservation": res.get("session"),
         "note": "session/worktree/goal подготовлены; ЗАПУСКА НЕТ "
                 "(adapter=manual): исполни delegate_task внешне с goal-"
                 "файлом, затем flowctl run --correlation-id "
-                f"{correlation} отметит старт",
+                f"{correlation} отметит старт"
+                + ("; WARN: " + warnings[0] if warnings else ""),
     }, args.as_json)
     return 0
 
@@ -1275,6 +1294,213 @@ def cmd_reconcile(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- regress
+# J51.2: регресс своего куска — механически. Дифф (base...HEAD, иначе staged)
+# детерминированно маппится в затронутые тестовые домены, гоняются только они,
+# факт прогона — артефакт test-model/regress/<C>/regress-<N>.md (PASS/FAIL,
+# commit, сьюты, хвост лога ≤50 строк, дата). --final пишет regress-final.md
+# (финальный прогон; нумерованные артефакты финальными не считаются — J51.3).
+
+REGRESS_SCHEMA = "flowctl-regress/1"
+REGRESS_DEFAULT_BASE = "main"
+REGRESS_LOG_TAIL_LINES = 50
+# Маппинг дифф-префикс → тестовый домен; всё, что не покрыто правилами
+# (включая scripts/ и корень), идет в общий tests/.
+REGRESS_DOMAIN_RULES = (
+    ("frontend/", "tests/web"),
+    ("backend/", "tests/api"),
+)
+
+
+def regress_diff_files(repo: Path, base: str) -> tuple[list[str], str]:
+    """Измененные файлы для regress: `git diff <base>...HEAD`; base недоступен
+    или дифф пуст → staged (`git diff --cached --name-only`; тесты кладут дифф
+    в индекс). Возвращает (файлы, источник — для артефакта)."""
+    def _names(*git_args: str) -> list[str] | None:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *git_args],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+    files = _names("diff", "--name-only", f"{base}...HEAD") if base else None
+    if files:
+        return files, f"git diff {base}...HEAD"
+    staged = _names("diff", "--cached", "--name-only")
+    if staged:
+        return staged, "git diff --cached (staged)"
+    return [], (f"git diff {base}...HEAD" if files is not None
+                else "git diff --cached (staged)")
+
+
+def regress_domains(files: list[str]) -> list[str]:
+    """J51.2: детерминированный маппинг диффа → затронутые тестовые домены:
+    frontend/** → tests/web, backend/** → tests/api, всё остальное (в т.ч.
+    scripts/) → tests/. Порядок — по правилам, без дублей.
+
+    BUG-video-001 (дедуп доменов, ДО прогона): частичные домены
+    (tests/api, tests/web) лежат под общим каталогом tests/; прогон
+    частичных ВМЕСТЕ с tests/ (или нескольких частичных в одном
+    pytest-вызове) рождает коллизию conftest для bare-импортов —
+    pytest exit 2 на коллекции. Если в маппинге присутствует общий домен
+    tests/ или затронуто больше одного частичного — весь прогон
+    сворачивается в ОДИН общий домен tests/ (одиночный частичный домен
+    сохраняется как есть). Если каталога tests/ нет, свернувшийся прогон
+    дает заметный WARN исхода regress (domain_without_tests), не молчу.
+    """
+    domains: list[str] = []
+    other = False
+    for rel in files:
+        norm = rel.replace("\\", "/").lstrip("./")
+        for prefix, domain in REGRESS_DOMAIN_RULES:
+            if norm.startswith(prefix):
+                if domain not in domains:
+                    domains.append(domain)
+                break
+        else:
+            other = True
+    if other and "tests" not in domains:
+        domains.append("tests")
+    partial = [d for d in domains if d != "tests"]
+    if "tests" in domains or len(partial) > 1:
+        return ["tests"]
+    return domains
+
+
+def regress_next_number(art_dir: Path) -> int:
+    """Следующий номер артефакта regress-<N>.md (regress-final.md не нумерованный —
+    не считается)."""
+    nums = []
+    for p in art_dir.glob("regress-*.md"):
+        m = re.fullmatch(r"regress-(\d+)\.md", p.name)
+        if m:
+            nums.append(int(m.group(1)))
+    return max(nums, default=0) + 1
+
+
+def cmd_regress(args) -> int:
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir() or not _git_head(repo):
+        print(f"FLOWCTL-ERROR: не git-репозиторий: {repo}", file=sys.stderr)
+        return 2
+    change = args.change
+    # change-id протекает из маркеров/автоматизации (недоверенный вход) —
+    # строго в путь записи не идет: единая валидация change_id_problem
+    # (session_check; review-001 #1, review-003 #3 — та же функция на
+    # читающем конце ворот pr_validate.check_regress_final).
+    cid_problem = sc.change_id_problem(change)
+    if cid_problem:
+        print(f"FLOWCTL-ERROR: {cid_problem}", file=sys.stderr)
+        return 2
+    commit = _git_head(repo)
+    files, diff_source = regress_diff_files(repo, args.base)
+    domains = regress_domains(files)
+    suites = [d for d in domains if (repo / d).is_dir()]
+    skipped = [d for d in domains if d not in suites]
+
+    pytest_rc: int | None = None
+    log_tail = ""
+    timeout_hit = False
+    if suites:
+        t0_args = [sys.executable, "-m", "pytest", *suites, "-q"]
+        try:
+            proc = subprocess.run(
+                t0_args, capture_output=True, text=True,
+                cwd=str(repo), timeout=args.timeout,
+            )
+            pytest_rc = proc.returncode
+            out = (proc.stdout or "") + (proc.stderr or "")
+            log_tail = "\n".join(
+                out.strip().splitlines()[-REGRESS_LOG_TAIL_LINES:])
+        except subprocess.TimeoutExpired as exc:
+            timeout_hit = True
+            out_head = (exc.stdout or "")
+            if isinstance(out_head, bytes):
+                out_head = out_head.decode("utf-8", errors="replace")
+            log_tail = "\n".join(out_head.strip().splitlines()[
+                -REGRESS_LOG_TAIL_LINES:]) or f"pytest timeout > {args.timeout}s"
+    # Домен затронут диффом, но каталога тестов не существует — заметный
+    # WARN-исход, не молчаливый PASS (review-001 #2): exit 0, но вердикт
+    # WARN и пометка в артефакте, чтобы воротам не пришел фиктивно зеленый
+    # прогон.
+    domain_without_tests = bool(domains) and not suites
+    if pytest_rc not in (None, 0):
+        verdict = "FAIL"
+    elif domain_without_tests:
+        verdict = "WARN"
+    else:
+        verdict = "PASS"
+
+    art_dir = repo / "test-model" / "regress" / change
+    art_dir.mkdir(parents=True, exist_ok=True)
+    if args.final:
+        art_name = "regress-final.md"
+    else:
+        art_name = f"regress-{regress_next_number(art_dir)}.md"
+    art_path = art_dir / art_name
+    lines = [
+        f"# Regress {change} — {art_name}",
+        "",
+        f"- change: {change}",
+        f"- date: {gr.utcnow_iso()}",
+        f"- commit: {commit}",
+        # J51 (review-003 #4): путь дерева прогона — ворота merge сверяют
+        # HEAD этого дерева с commit артефакта (если worktree указан,
+        # его текущий коммит обязан совпадать с проверяемым).
+        f"- worktree: {repo}",
+        f"- verdict: {verdict}",
+        f"- diff source: {diff_source}",
+        f"- changed files: {len(files)}",
+    ]
+    lines += [f"  - {f}" for f in files[:50]]
+    if len(files) > 50:
+        lines.append(f"  - … и еще {len(files) - 50}")
+    lines += [
+        f"- suites: {', '.join(suites) if suites else '— (нечего гнать)'}",
+    ]
+    if skipped:
+        lines.append(f"- suites skipped (нет каталога): {', '.join(skipped)}")
+    lines += [
+        f"- pytest exit code: {pytest_rc if pytest_rc is not None else '—'}",
+        "",
+    ]
+    if timeout_hit:
+        lines += [f"- note: pytest прерван по таймауту ({args.timeout}s)", ""]
+    if domain_without_tests:
+        lines += ["- note: WARN — домен(ы) без тестов: "
+                  f"{', '.join(skipped)} — затронуты диффом, но каталогов "
+                  "не существует; прогон не выполнялся", ""]
+    elif not suites and not timeout_hit:
+        lines += ["- note: дифф не затронул существующие тестовые домены — "
+                  "прогон не выполнялся", ""]
+    lines += ["## Хвост лога (до 50 строк)", "",
+              "```", log_tail or "(пусто)", "```", ""]
+    art_path.write_text("\n".join(lines), encoding="utf-8")
+
+    _emit({
+        "schema_version": REGRESS_SCHEMA, "command": "regress",
+        "change": change, "repo": str(repo),
+        "verdict": verdict,
+        "final": bool(args.final),
+        "diff_source": diff_source,
+        "changed_files": len(files),
+        "domains": domains,
+        "suites": suites,
+        "suites_skipped": skipped,
+        "pytest_exit": pytest_rc,
+        "timeout": timeout_hit,
+        "commit": commit,
+        "artifact": str(art_path),
+        "note": "артефакт записан: " + str(art_path)
+                + ("; regress-final — вход ворот merge (J51.3)"
+                   if args.final else
+                   "; нумерованный regress-артефакт финальным не считается"),
+    }, args.as_json)
+    return 0 if verdict in ("PASS", "WARN") else 1
+
+
 # --------------------------------------------------------------------- CLI
 
 
@@ -1412,6 +1638,24 @@ def main(argv: list[str] | None = None) -> int:
     p_rec.add_argument("--audit", default=None)
     p_rec.add_argument("--json", action="store_true", dest="as_json")
     p_rec.set_defaults(func=cmd_reconcile)
+
+    # J51.2: регресс затронутых доменов своего куска (+ regress-final, J51.3).
+    p_reg = sub.add_parser(
+        "regress", help="регресс затронутых тестовых доменов (J51.2)")
+    p_reg.add_argument("--repo", default=".")
+    p_reg.add_argument("--change", required=True,
+                       help="идентификатор change (артефакт test-model/"
+                            "regress/<change>/)")
+    p_reg.add_argument("--base", default=REGRESS_DEFAULT_BASE,
+                       help="база диффа (default: main; дифф base...HEAD, "
+                            "иначе staged)")
+    p_reg.add_argument("--final", action="store_true",
+                       help="артефакт regress-final.md вместо нумерованного "
+                            "regress-<N>.md (финальный прогон)")
+    p_reg.add_argument("--timeout", type=int, default=900,
+                       help="таймаут pytest-прогона, сек (default: 900)")
+    p_reg.add_argument("--json", action="store_true", dest="as_json")
+    p_reg.set_defaults(func=cmd_regress)
 
     args = ap.parse_args(argv)
     return args.func(args)

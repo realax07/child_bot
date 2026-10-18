@@ -48,6 +48,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,29 @@ def canonical(rel: str) -> str:
     while p.startswith("./"):
         p = p[2:]
     return p.strip("/")
+
+
+# Каноническая грамматика change-id (review-001 #1): [A-Za-z0-9][A-Za-z0-9._-]
+# до 64 символов, без слэшей и '..'. Единая точка для обоих концов (J51,
+# review-003 #3): flowctl.cmd_regress (запись артефакта) и
+# pr_validate.check_regress_final (чтение артефакта воротами merge).
+CHANGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def change_id_problem(change_id: str) -> str | None:
+    """Валидация change-id (недоверенный вход из маркеров/автоматизации).
+
+    Возвращает None, если change-id допустим, иначе — текст проблемы
+    (для списка проблем pr_validate / stderr flowctl). Change-id строго
+    в путь не идет при невалидности: без слэшей и '..' — path traversal
+    невозможен по построению.
+    """
+    cid = str(change_id or "")
+    if CHANGE_ID_RE.fullmatch(cid) and ".." not in cid:
+        return None
+    return ("недопустимый change-id: " + repr(cid) + " — разрешены "
+            "латиница/цифры/._- (до 64 символов, первый — буквоцифра), "
+            "без слэшей и '..'")
 
 
 def _fnmatch_segments(pattern: str, path: str) -> bool:

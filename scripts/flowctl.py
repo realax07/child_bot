@@ -76,6 +76,8 @@ Usage:
         [--state PATH] [--audit PATH] [--json]
     flowctl.py regress --change C [--repo PATH] [--base REF] [--tier domain|smoke]
         [--final] [--xdist N] [--suggest-baseline] [--timeout SEC] [--json]
+    flowctl.py integrate <repo> [--cid ID] [--base REF] [--registry PATH]
+        [--json]
 
 Exit codes: 0 — успех/ALLOW/accepted (run/prepare — разрешено; regress —
 PASS); 1 — DENY/STALE_SNAPSHOT/returned (regress — FAIL); 2 — UNKNOWN/ошибка
@@ -2077,6 +2079,175 @@ def cmd_regress(args) -> int:
 # --------------------------------------------------------------------- CLI
 
 
+# ------------------------------------------------- J57: интеграция пакета
+# Детерминированный каркас возврата к J9 (backlog/J57-pm-ops-worktree):
+# сборка результатов делегаций — механика flowctl (integrate), разрешение
+# конфликтов — семантика dev-lead (роль №14). ПМ ветки продукта не трогает.
+INTEGRATE_BRANCH_PREFIX = "integration"
+# Ветки пакета: деривация prepare (flow/<cid>), chore-ветки роли, pipeline/**
+# (push-политика J42).
+PACKAGE_BRANCH_PREFIXES = ("flow/", "chore/", "pipeline/")
+# Активная сессия = сборка рано: сначала закрыть делегации (finish/release),
+# иначе интеграционная ветка собирает недоделку. Синхронно с
+# WORKTREE_ACTIVE_STATUSES энфорсера (finished/blocked/stale — не активные).
+INTEGRATE_ACTIVE_STATUSES = ("reserved", "running", "needs_attention")
+INTEGRATE_REASON_ACTIVE = "ACTIVE_SESSIONS"
+INTEGRATE_REASON_BRANCH_EXISTS = "INTEGRATION_BRANCH_EXISTS"
+INTEGRATE_REASON_CID_REQUIRED = "CID_REQUIRED"
+
+
+def _integration_branch_name(cid: str) -> str:
+    """integration/<cid>: полный cid (как ветки делегаций, J52-w1.1);
+    небезопасный/длинный id → хэш-суффикс (та же деривация, что
+    branch_name_for, но под префиксом integration/)."""
+    tail = cid if _branch_id_ok(cid) else (
+        hashlib.sha1(cid.encode("utf-8")).hexdigest()[:8])
+    return f"{INTEGRATE_BRANCH_PREFIX}/{tail}"
+
+
+def _session_in_repo(session: dict, repo: Path) -> bool:
+    """Сессия этого репо: repo/worktree записи совпадает с repo или лежит
+    под ним (worktrees репо; синхронно с _in_context энфорсера)."""
+    repo_n = str(repo).replace("\\", "/").rstrip("/")
+    for key in ("repo", "worktree"):
+        base = session.get(key)
+        if not base:
+            continue
+        b = str(base).replace("\\", "/").rstrip("/")
+        if b == repo_n or b.startswith(repo_n + "/"):
+            return True
+    return False
+
+
+def _ref_exists(repo: Path, ref: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
+         f"{ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0
+
+
+def cmd_integrate(args) -> int:
+    """J57: сборка пакета — детерминированный каркас возврата к J9.
+
+    По реестру сессий показывает ветки пакета (flow/*, chore/*, pipeline/*)
+    репозитория, проверяет отсутствие АКТИВНЫХ сессий (иначе REFUSE),
+    создает интеграционную ветку integration/<cid> от origin/main (фолбэк
+    main) и печатает список веток для dev-lead'а. Merge/конфликты —
+    семантика dev-lead; ветка НЕ пушится и НЕ мерджится здесь.
+    """
+    raw_repo = getattr(args, "repo_pos", None) or getattr(args, "repo_opt", None)
+    if not raw_repo:
+        print("FLOWCTL-ERROR: укажи репозиторий: flowctl integrate <repo>",
+              file=sys.stderr)
+        return 2
+    repo = Path(raw_repo).expanduser().resolve()
+    if not repo.is_dir() or not _git_head(repo):
+        print(f"FLOWCTL-ERROR: не git-репозиторий: {repo}", file=sys.stderr)
+        return 2
+    registry_path = Path(args.registry).expanduser() if args.registry else (
+        Path.home() / ".hermes" / "state" / "active_sessions.json")
+    data, err = sc.registry_load(registry_path)
+    if err:
+        # fail-closed: не умеем проверить отсутствие активных сессий —
+        # сборку не начинаем (это отказ среды, не DENY пакета).
+        print(f"FLOWCTL-ERROR: реестр сессий нечитаем ({registry_path}): {err}",
+              file=sys.stderr)
+        return 2
+    sessions = [s for s in data.get("sessions", []) if isinstance(s, dict)]
+    repo_sessions = [s for s in sessions if _session_in_repo(s, repo)]
+    package_branches = sorted({
+        str(s["branch"]) for s in repo_sessions
+        if s.get("branch")
+        and str(s["branch"]).startswith(PACKAGE_BRANCH_PREFIXES)
+    })
+    active_ids = sorted({
+        str(s.get("delegation_id", "?")) for s in repo_sessions
+        if s.get("status") in INTEGRATE_ACTIVE_STATUSES
+    })
+
+    cid = (args.cid or "").strip()
+    if not cid:
+        # Единственный correlation-id (или change) сессий этого репо — cid
+        # пакета; неоднозначно/пусто → пусть caller назовет явно.
+        cids = {str(s["correlation_id"]) for s in repo_sessions
+                if s.get("correlation_id")}
+        if len(cids) == 1:
+            cid = cids.pop()
+        else:
+            changes = {str(s["change"]) for s in repo_sessions
+                       if s.get("change")}
+            if len(changes) == 1:
+                cid = changes.pop()
+
+    payload = {
+        "schema_version": OUTPUT_SCHEMA,
+        "command": "integrate",
+        "repo": str(repo),
+        "cid": cid or None,
+        "package_branches": package_branches,
+        "active_sessions": active_ids,
+    }
+
+    if active_ids:
+        _emit({**payload, "integrated": False,
+               "reason": INTEGRATE_REASON_ACTIVE,
+               "note": "активные сессии этого репо — сначала закрой их "
+                       "(finish/release); интеграционная ветка не создана "
+                       "(собирать недоделку = гонка с делегациями)"},
+              args.as_json)
+        return 1
+
+    if not cid:
+        _emit({**payload, "integrated": False,
+               "reason": INTEGRATE_REASON_CID_REQUIRED,
+               "note": "в реестре нет однозначного correlation-id/change для "
+                       "этого репо — укажи --cid явно"},
+              args.as_json)
+        return 2
+
+    branch = _integration_branch_name(cid)
+    if _ref_exists(repo, f"refs/heads/{branch}"):
+        _emit({**payload, "integrated": False,
+               "reason": INTEGRATE_REASON_BRANCH_EXISTS,
+               "integration_branch": branch,
+               "note": "интеграционная ветка уже существует — не пересоздаю; "
+                       "передай ее dev-lead'у как есть"},
+              args.as_json)
+        return 1
+
+    base = None
+    for cand in ((args.base or "").strip(), "origin/main", "main"):
+        if cand and _ref_exists(repo, cand):
+            base = cand
+            break
+    if base is None:
+        _emit({**payload, "integrated": False, "reason": "BASE_MISSING",
+               "integration_branch": branch,
+               "note": f"нет базы ({args.base or 'origin/main'}/main): "
+                       "сделай git fetch origin в репо и повтори"},
+              args.as_json)
+        return 2
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "branch", branch, base],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        print(f"FLOWCTL-ERROR: git branch {branch} {base}: "
+              f"{proc.stderr.strip()}", file=sys.stderr)
+        return 2
+
+    _emit({**payload, "integrated": True, "integration_branch": branch,
+           "base": base,
+           "note": "сборка: передай dev-lead'у — merge веток пакета в "
+                   f"{branch} (конфликты — семантика dev-lead, канон J9); "
+                   "ветка локальная, не пушится отсюда"},
+          args.as_json)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Прокси на поставки 02–03: argv передается целиком (argparse.REMAINDER
     # не пробрасывает опции, начинающиеся с «-», поэтому маршрутизация до
@@ -2266,6 +2437,27 @@ def main(argv: list[str] | None = None) -> int:
                        help="таймаут pytest-прогона, сек (default: 900)")
     p_reg.add_argument("--json", action="store_true", dest="as_json")
     p_reg.set_defaults(func=cmd_regress)
+
+    # J57: детерминированная сборка пакета — ветки из реестра, проверка
+    # отсутствия активных сессий, integration/<cid> от origin/main;
+    # merge/конфликты — семантика dev-lead (канон J9).
+    p_int = sub.add_parser(
+        "integrate",
+        help="сборка пакета: ветки из реестра → integration/<cid> (J57)")
+    p_int.add_argument("repo_pos", nargs="?", default=None,
+                       help="путь к репозиторию пакета")
+    p_int.add_argument("--repo", dest="repo_opt", default=None,
+                       help="путь к репозиторию (альтернатива позиционному)")
+    p_int.add_argument("--cid", default=None,
+                       help="correlation-id/change пакета (по умолчанию — "
+                            "единственный из реестра для этого репо)")
+    p_int.add_argument("--base", default="origin/main",
+                       help="база интеграционной ветки (default origin/main, "
+                            "фолбэк main)")
+    p_int.add_argument("--registry", default=None,
+                       help="путь к active_sessions.json (fixture в тестах)")
+    p_int.add_argument("--json", action="store_true", dest="as_json")
+    p_int.set_defaults(func=cmd_integrate)
 
     args = ap.parse_args(argv)
     return args.func(args)

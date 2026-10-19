@@ -279,11 +279,32 @@ def check_regress_final(repo: Path, change_id: str) -> list[str]:
       - verdict PASS (FAIL/WARN/нечитаемый — артефакт не засчитан);
       - свежесть ≤ 7 дней (поле date; не читается — mtime файла);
       - commit == HEAD ветки PR, ИЛИ commit — предок HEAD не старше последнего
-        касания измененных файлов (прогон «более свежий, чем изменения»);
+ касания измененных файлов (прогон «более свежий, чем изменения»);
+ мета-файлы, не влияющие на поведение тестов, из «измененных файлов»
+ исключены (BUG-023: сам артефакт regress-final.md и
+ test-model/regress/<change-id>/**; BUG-024: весь
+ test-model/regress/**, test-model/reviews/**, code-reviews/** —
+ мета-коммит после прогона не инвалидирует его);
+      - tooling-пути (scripts/**, .github/**), тронутые после commit
+ прогона — REGRESS_FINAL_STALE с нотой «freeze tooling» (J54: среда
+ прогона изменилась, regress-final повторяется на замороженном
+ tooling);
       - если в артефакте указан worktree — HEAD этого дерева обязан совпадать
         с commit прогона (сверка «артефакт ↔ дерево», review-003 #4).
     Нарушения: REGRESS_FINAL_MISSING (нет артефакта / не-PASS) и
-    REGRESS_FINAL_STALE (протух по времени / commit не совпадает)."""
+    REGRESS_FINAL_STALE (протух по времени / commit не совпадает).
+
+    CI-деградации (BUG-022, ложный REGRESS_FINAL_STALE в CI-клоне):
+      - worktree из артефакта — локальный путь машины прогона и в CI-клоне
+        не читается как git-дерево → FLOW-WARNING в stderr, ворота НЕ блокируются
+        (сверка «артефакт ↔ дерево» информационная, инвариант обеспечивает
+        commit-сверка); STALE — только если дерево читается и HEAD ≠ commit;
+      - shallow-клон (actions/checkout fetch-depth 1): merge-base не может
+        верифицировать предка → тихий `git fetch --unshallow origin` (с
+        таймаутом); если не помог и заданы GITHUB_TOKEN+GITHUB_REPOSITORY —
+        предок проверяется через GitHub API compare (base=HEAD...commit,
+        статус 'behind'/'identical' = предок); иначе — явный FAIL
+        UNKNOWN_ANCESTRY с объяснением (не молчаливый STALE)."""
     # change-id идет в путь чтения (недоверенный вход из маркера PR) —
     # единая грамматика с пишущим концом flowctl.cmd_regress (review-003 #3,
     # review-001 #1): без валидации — traversal чтения + эхо в сообщение.
@@ -342,11 +363,16 @@ def check_regress_final(repo: Path, change_id: str) -> list[str]:
             "не читается — артефакт не от flowctl regress "
             "(REGRESS_FINAL_STALE, J51.3)")
     else:
-        reason = _regress_commit_problem(repo, cm.group(1))
+        reason = _regress_commit_problem(repo, cm.group(1), change_id)
         if reason:
+            # BUG-022: неверифицируемая ancestry в shallow-клоне — отдельный
+            # явный тег UNKNOWN_ANCESTRY (не ложный REGRESS_FINAL_STALE).
+            tag = ("UNKNOWN_ANCESTRY"
+                   if reason.startswith("UNKNOWN_ANCESTRY")
+                   else "REGRESS_FINAL_STALE")
             problems.append(
                 f"test-model/regress/{change_id}/regress-final.md: {reason} "
-                "(REGRESS_FINAL_STALE, J51.3)")
+                f"({tag}, J51.3)")
         # Свежестная сверка «артефакт ↔ дерево» (review-003 #4): если в
         # артефакте указан worktree прогона, его ТЕКУЩИЙ HEAD обязан
         # совпадать с commit прогона — дерево, уехавшее вперед после
@@ -357,11 +383,18 @@ def check_regress_final(repo: Path, change_id: str) -> list[str]:
             wt = Path(wm.group(1))
             wt_head = _git(wt, "rev-parse", "HEAD")
             if not wt_head:
-                problems.append(
-                    f"test-model/regress/{change_id}/regress-final.md: "
-                    f"worktree {wm.group(1)} не читается как git-дерево — "
-                    "сверка «артефакт ↔ дерево» невозможна "
-                    "(REGRESS_FINAL_STALE, J51.3)")
+                # BUG-022: worktree — локальный путь машины прогона; в CI-клоне
+                # он не читается как git-дерево, и это НЕ признак протухшего
+                # прогона (commit-сверка выше независима и достаточна).
+                # Неблокирующий WARNING — молчаливого пропуска нет, но и
+                # ложного REGRESS_FINAL_STALE в CI тоже нет.
+                print(
+                    f"pr_validate: FLOW-WARNING: test-model/regress/{change_id}/"
+                    f"regress-final.md: worktree {wm.group(1)} не читается как "
+                    "git-дерево (локальный путь машины прогона) — сверка "
+                    "«артефакт ↔ дерево» пропущена, инвариант обеспечивает "
+                    "commit-сверка (BUG-022)",
+                    file=sys.stderr)
             elif not wt_head.startswith(art_commit):
                 problems.append(
                     f"test-model/regress/{change_id}/regress-final.md: "
@@ -381,9 +414,96 @@ def _git(repo: Path, *args: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def _regress_commit_problem(repo: Path, commit: str) -> str | None:
+def _is_shallow(repo: Path) -> bool:
+    """Shallow-клон (actions/checkout fetch-depth=1)?"""
+    return _git(repo, "rev-parse", "--is-shallow-repository") == "true"
+
+
+REGRESS_UNSHALLOW_TIMEOUT_S = 120
+REGRESS_API_TIMEOUT_S = 30
+
+
+def _try_unshallow(repo: Path) -> bool:
+    """BUG-022: тихий `git fetch --unshallow origin` с таймаутом.
+    True — история полная, локальные git-проверки снова работают.
+    CI-клон сужает refspec до одной ветки (clone -b / actions/checkout):
+    перед unshallow расширяем ветки origin, иначе после unshallow не будет
+    origin/main и сверка «не старше измененных файлов» все равно упадет
+    («измененные файлы PR не определимы»)."""
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "set-branches", "--add",
+         "origin", "*"],
+        capture_output=True, text=True, timeout=30)  # best effort
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "fetch", "--unshallow", "origin"],
+            capture_output=True, text=True, timeout=REGRESS_UNSHALLOW_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def _github_compare_ancestor(head: str, commit: str) -> bool | None:
+    """BUG-022: API-fallback ancestry для shallow-клона — GitHub compare
+    base(HEAD)...commit. True — 'behind'/'identical' (commit — предок HEAD
+    или совпадает); False — 'ahead'/'divergent' (не предок); None — нет
+    GITHUB_TOKEN/GITHUB_REPOSITORY или ошибка API (верdict неизвестен)."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    slug = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not slug:
+        return None
+    url = f"https://api.github.com/repos/{slug}/compare/{head}...{commit}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "pr_validate",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=REGRESS_API_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    status = data.get("status")
+    if status in ("behind", "identical"):
+        return True
+    if status in ("ahead", "divergent"):
+        return False
+    return None
+
+
+def _regress_commit_problem(repo: Path, commit: str,
+                            change_id: str = "") -> str | None:
     """J51.3: commit артефакта == HEAD ветки PR, ИЛИ предок HEAD не старше
-    последнего касания измененных файлов. Возвращает текст проблемы или None."""
+    последнего касания измененных файлов. Возвращает текст проблемы или None.
+
+    BUG-023: сам артефакт regress-final.md и весь test-model/regress/<cid>/
+    того же change исключаются из «измененных файлов»: артефакт коммитится
+    ПОСЛЕ прогона и потому всегда новее удостоверяемого кода — без
+    исключения свежестная сверка вечно дает REGRESS_FINAL_STALE
+    (ворота самоубийственны).
+
+    BUG-024: исключение расширено до мета-файлов, не влияющих на поведение
+    тестов: весь test-model/regress/** (артефакты и прогоны ЛЮБЫХ change),
+    test-model/reviews/** и code-reviews/** (мета Reviewer-Delegation).
+    Любой мета-коммит после regress-прогона не должен давать ложный
+    REGRESS_FINAL_STALE и обязательный лишний полный перегон. Продуктовые
+    и тестовые файлы (services/**, backend/**, frontend/**, tests/**,
+    openspec/**) — как прежде: правка после прогона = STALE.
+
+    J54: tooling-пути (scripts/**, .github/**) после прогона — тоже
+    STALE, но с нотой «freeze tooling: tooling изменился после прогона,
+    повтори regress-final» — измененный tooling инвалидирует среду
+    прогона целиком (харнесс/CI/статика), прогон не воспроизводим.
+
+    BUG-022: в shallow-клоне merge-base не может верифицировать предка
+    (история неполна) → сначала тихий `git fetch --unshallow origin`;
+    если не помог и есть GITHUB_TOKEN+GITHUB_REPOSITORY — ancestry через
+    GitHub API compare (при 'behind'/'identical' ворота пропускают: локальная
+    сверка «не старше измененных файлов» в урезанном клоне все равно
+    неверифицируема, а предок-коммит не может быть свежее HEAD-изменений
+    больше, чем прогон); иначе — явный FAIL UNKNOWN_ANCESTRY, не молчаливый
+    REGRESS_FINAL_STALE."""
     head = _git(repo, "rev-parse", "HEAD")
     if not head:
         return f"HEAD репозитория не читается, commit {commit} не верифицирован"
@@ -391,12 +511,36 @@ def _regress_commit_problem(repo: Path, commit: str) -> str | None:
         return None
     # Предок HEAD и не старше измененных файлов — прогон «более свежий,
     # чем изменения», засчитывается.
-    ancestor = subprocess.run(
-        ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, head],
-        capture_output=True, text=True, timeout=30)
-    if ancestor.returncode != 0:
-        return (f"commit {commit} не совпадает с HEAD ({head[:12]}) и не "
-                "является его предком")
+    def _is_ancestor() -> "subprocess.CompletedProcess[str] | None":
+        try:
+            return subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, head],
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    ancestor = _is_ancestor()
+    if ancestor is None or ancestor.returncode != 0:
+        if _is_shallow(repo):
+            if _try_unshallow(repo):
+                ancestor = _is_ancestor()
+        if ancestor is None or ancestor.returncode != 0:
+            if _is_shallow(repo):
+                verdict = _github_compare_ancestor(head, commit)
+                if verdict is True:
+                    return None
+                if verdict is False:
+                    return (
+                        f"commit {commit} не совпадает с HEAD ({head[:12]}) "
+                        "и не является его предком (GitHub API compare)")
+                return (
+                    f"UNKNOWN_ANCESTRY: shallow-клон: ancestry commit "
+                    f"{commit} относительно HEAD ({head[:12]}) неверифицируема — "
+                    "`git fetch --unshallow origin` не удался, проверка через "
+                    "GitHub API недоступна (нужны GITHUB_TOKEN и "
+                    "GITHUB_REPOSITORY, либо запусти ворота на полном клоне)")
+            return (f"commit {commit} не совпадает с HEAD ({head[:12]}) и не "
+                    "является его предком")
     files: set[str] = set()
     for base in ("main", "origin/main"):
         out = _git(repo, "diff", "--name-only", f"{base}...HEAD")
@@ -408,15 +552,48 @@ def _regress_commit_problem(repo: Path, commit: str) -> str | None:
     if not files:
         return (f"commit {commit} не совпадает с HEAD ({head[:12]}), "
                 "измененные файлы PR не определимы")
+    # BUG-023/BUG-024: мета-файлы, не влияющие на поведение тестов, всегда
+    # новее commit прогона (коммитятся после него) — исключаем из свежестной
+    # сверки, иначе ворота вечно REGRESS_FINAL_STALE. BUG-023 — собственные
+    # regress-артефакты; BUG-024 — regress/прогон-артефакты ЛЮБЫХ change,
+    # ревью-мета (test-model/reviews/**) и мета Reviewer-Delegation
+    # (code-reviews/**).
+    meta_prefixes = (
+        "code-reviews/",
+        "test-model/regress/",
+        "test-model/reviews/",
+    )
+    meta_files = {f for f in files if f.startswith(meta_prefixes)}
+    files -= meta_files
+    if not files:
+        # После исключения мета-файлов измененных (продуктовых/тестовых)
+        # файлов нет — прогон удостоверяет весь дифф, ворота пропускают
+        # (это НЕ «не определимы» из BUG-022-ветки выше).
+        return None
     art_ts = _git(repo, "show", "-s", "--format=%ct", commit)
     if not art_ts or not art_ts.isdigit():
         return f"commit {commit} не найден в репозитории"
+    newer: list[str] = []
     for f in sorted(files):
         ts = _git(repo, "log", "-1", "--format=%ct", "--", f)
         if ts and ts.isdigit() and int(ts) > int(art_ts):
-            return (f"commit {commit} старше последнего касания измененного "
-                    f"файла {f}")
-    return None
+            newer.append(f)
+    if not newer:
+        return None
+    # J54: tooling-пути (scripts/**, .github/**), тронутые ПОСЛЕ commit
+    # regress-прогона, инвалидируют его особо — вся среда прогона
+    # (харнесс, CI-ворота, статика) могла измениться, результат не
+    # воспроизводим тем же прогоном. Отдельная нота «freeze tooling»:
+    # tooling замораживается на время финального прогона, прогон
+    # повторяется. Мета-исключения BUG-023/BUG-024 выше приоритетны —
+    # мета-файлы в newer не попадают.
+    tooling = [f for f in newer if f.startswith(("scripts/", ".github/"))]
+    if tooling:
+        return ("freeze tooling: tooling изменился после прогона, повтори "
+                f"regress-final ({tooling[0]})")
+    f = newer[0]
+    return (f"commit {commit} старше последнего касания измененного "
+            f"файла {f}")
 
 
 def check_ops(repo: Path, marker: str) -> list[str]:

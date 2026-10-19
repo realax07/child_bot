@@ -331,12 +331,20 @@ def _acquire_lock(path: Path, timeout: float = 10.0) -> Path:
         except FileExistsError:
             stale = False
             pid_file = lock / "pid"
+            owner_pid = ""
             if pid_file.is_file():
                 try:
-                    stale = not pid_alive(pid_file.read_text(
-                        encoding="utf-8").strip())
+                    owner_pid = pid_file.read_text(
+                        encoding="utf-8").strip()
                 except OSError:
-                    stale = False
+                    owner_pid = ""
+                # BUG-022 (CI: ['WIN','WIN'] в concurrent-reserve): пустой
+                # или нечитаемый pid — это окно между mkdir() и записью pid
+                # живого владельца, а НЕ мертвый владелец. pid_alive("")
+                # вернет False и прежний код мгновенно снимал лок ЖИВОГО
+                # владельца → двое внутри критической секции. Пустой pid
+                # ждет как живой (съем только по полному таймауту).
+                stale = bool(owner_pid) and not pid_alive(owner_pid)
             else:
                 # Лок без pid-файла: либо создается прямо сейчас (не мешаем
                 # короткую границу), либо оставлен старой версией — снимаем

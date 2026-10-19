@@ -132,7 +132,7 @@ DEFAULT_GATES: dict[str, tuple[str, ...]] = {
 
 AUDIT_EVENT_TYPES = (
     "request", "decision", "reservation", "agent_started", "agent_finished",
-    "gate_report", "accepted", "returned", "recovery",
+    "gate_report", "accepted", "returned", "recovery", "release",
 )
 
 # Секреты и полный stdout/stderr агента в JSONL не копируются (ТЗ 05;

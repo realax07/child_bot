@@ -129,6 +129,30 @@ regress-final (≤2 итераций на релиз).
 - **enforcing** — DENY/UNKNOWN останавливают действие (текущий режим).
 - Переключение: `python scripts/flow_mode.py set enforcing|shadow --by <кто>`; состояние: `~/.hermes/state/flow_mode.json`.
 
+## Делегация и сборка пакета (J57, возврат к J9)
+
+Правило одним предложением: **делегация = prepare, сборка = integrate +
+dev-lead, ПМ git не трогает.**
+
+- **Делегация** — `flowctl prepare` ОБЯЗАТЕЛЕН (безусловное правило
+  диспетчеризации): ветка делегации (`flow/<cid>`) и worktree создает
+  механика prepare, ПМ ветку руками не делает.
+- **Сборка** — `flowctl integrate <repo> [--cid ID]`: по реестру сессий
+  показывает ветки пакета (`flow/*`, `chore/*`, `pipeline/*`) этого репо,
+  REFUSE при активных сессиях (`reserved/running/needs_attention`),
+  создает интеграционную ветку `integration/<cid>` от origin/main
+  (фолбэк main) и печатает список веток для dev-lead'а. Merge веток и
+  разрешение конфликтов — семантика dev-lead (роль №14, узкий бриф);
+  ветка локальная, отсюда не пушится.
+- **Защита ПМ** — enforcer (push_gate, L4): ПМ-push (вне делегации) в
+  продуктовый репо требует маркера интеграции `[integrate]`/`[pipeline]`
+  в subject HEAD ИЛИ влитого HEAD (merged PR); без — DENY
+  `[PM_PUSH_POLICY]` с подсказкой «передай сборку dev-lead'у». Фабрика —
+  конвейерное репо, исключена (легитимные ПМ-пуши docs-заявок не ломаются);
+  список продуктовых репо — `FLOW_ENFORCER_PRODUCT_REPOS` (env, имена/пути
+  через запятую) или деривация из реестра (project ≠ `ai-factory` с
+  существующим `~/project/.git`, как `pm_bounds_check --all-projects`).
+
 ## Инциденты и recovery
 
 - Падение процесса → `flowctl reconcile` (или `session_check reconcile`): PID/worktree/status → stale/needs_attention. Ничего не удаляется молча.
@@ -143,7 +167,7 @@ regress-final (≤2 итераций на релиз).
 | `flow_transition.py` | ALLOW/DENY/UNKNOWN + коды причин, графы флоу |
 | `session_check.py` | резервация зон, post-check, reconcile |
 | `gate_runner.py` | ворота с digest/STALE, provenance, audit JSONL |
-| `flowctl.py` | оркестратор: prepare/run/finish/status/reconcile |
+| `flowctl.py` | оркестратор: prepare/run/finish/status/reconcile/integrate |
 | `flow_mode.py` | shadow/enforcing |
 
 Контракт: `contracts/flow_control_contract.md`. Спека: `openspec/specs/deterministic-flow/` (после слияния). Прогон всего: `python3 -m pytest tests/` (446 green).

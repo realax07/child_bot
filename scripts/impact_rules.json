@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "description": "J58: расширяемые правила механической сверки diff→требование (impact-гейт pr_validate.py). Правило: when — условия срабатывания (path — регэксп пути диффа, status — необязательный git-статус 'A'|'M'|'D' из `git diff --name-status`); require — требования к диффу сработавшего правила (path — регэксп, хотя бы один путь диффа должен совпасть; label — человекочитаемое имя ожидаемого артефакта; hint — подсказка в DENY). Exists-guard (J58-fix): требование применяется только к репо, где целевой артефакт существует в HEAD (продуктовый проект); нет артефакта в HEAD (фабрика без contracts/openapi.json, deploy/, backend/) — правило молчит. Расхождение = DENY с id правила и hint. Добавление правила = правка этого файла, код ворот не меняется.",
+  "rules": [
+    {
+      "id": "IR-01",
+      "title": "контракт изменился — openapi.json перегенерирован",
+      "when": [
+        {"path": "^services/[^/]+/openapi"},
+        {"path": "^contracts/"}
+      ],
+      "require": [
+        {
+          "path": "^contracts/openapi\\.json$",
+          "label": "contracts/openapi.json",
+          "hint": "перегенерируй contracts/openapi.json (урок релиза weather: неперегенерированный контракт = FAIL regress-final, круг зря)"
+        }
+      ]
+    },
+    {
+      "id": "IR-02",
+      "title": "новый сервис — deploy-матрица и RUNBOOK",
+      "when": [
+        {"path": "^services/[^/]+/", "status": "A"}
+      ],
+      "require": [
+        {
+          "path": "^deploy/deploy\\.sh$",
+          "label": "deploy/deploy.sh",
+          "hint": "новый сервис должен попасть в deploy-матрицу deploy/deploy.sh (урок релиза weather-1: deploy.sh не знал сервис — вскрылось при деплое)"
+        },
+        {
+          "path": "^deploy/RUNBOOK\\.md$",
+          "label": "deploy/RUNBOOK.md",
+          "hint": "опиши новый сервис в deploy/RUNBOOK.md"
+        }
+      ]
+    },
+    {
+      "id": "IR-03",
+      "title": "статика фронта изменилась — bump static_v",
+      "when": [
+        {"path": "^frontend/.*(?:static|templates)"},
+        {"path": "^services/[^/]+/frontend/.*(?:static|templates)"}
+      ],
+      "require": [
+        {
+          "path": "^backend/app/pages\\.py$",
+          "label": "backend/app/pages.py (static_v)",
+          "hint": "подними static_v в backend/app/pages.py (урок релиза video-1.1: static_v не забамплен — девопс остановил деплой)"
+        }
+      ]
+    },
+    {
+      "id": "IR-04",
+      "title": "миграция — упоминание в RUNBOOK",
+      "when": [
+        {"path": "(^|/)migrate_[^/]*\\.py$"}
+      ],
+      "require": [
+        {
+          "path": "^deploy/RUNBOOK\\.md$",
+          "label": "deploy/RUNBOOK.md (упоминание миграции)",
+          "hint": "добавь миграцию в deploy/RUNBOOK.md (порядок применения/отката)"
+        }
+      ]
+    }
+  ]
+}

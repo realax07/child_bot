@@ -596,6 +596,221 @@ def _regress_commit_problem(repo: Path, commit: str,
             f"файла {f}")
 
 
+# --- J58: impact-гейт (карта СА + механическая сверка diff→правила) ---
+
+IMPACT_RULES_REL = "scripts/impact_rules.json"
+IMPACT_SECTION_RE = re.compile(r"(?m)^##\s*Impact\b")
+
+
+def load_impact_rules(repo: Path) -> list[dict]:
+    """J58: расширяемые правила diff→требование из scripts/impact_rules.json.
+
+    Файла нет (проект без правил) или он не читается — сверка молчит
+    (WARN в stderr, не молчаливый пропуск логики: отсутствие правил —
+    легитимное состояние нового проекта, битый JSON — инцидент контента).
+    """
+    path = repo / IMPACT_RULES_REL
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        print(
+            f"pr_validate: FLOW-WARNING: {IMPACT_RULES_REL} не читается как JSON — "
+            "механическая сверка impact-правил пропущена (J58)",
+            file=sys.stderr,
+        )
+        return []
+    rules = data.get("rules") if isinstance(data, dict) else data
+    if not isinstance(rules, list):
+        return []
+    return [
+        r for r in rules
+        if isinstance(r, dict)
+        and r.get("id")
+        and r.get("when")
+        and isinstance(r.get("require"), list)
+        and r["require"]
+    ]
+
+
+def pr_changed_files(repo: Path) -> list[tuple[str | None, str]]:
+    """J58: список (status, path) измененных файлов PR.
+
+    Источники по приоритету:
+      1. env PR_CHANGED_FILES — строки «STATUS\\tpath» (конвенция CI
+         `git diff --name-status`) или просто «path» (status неизвестен);
+      2. fallback: `git diff --name-status main...HEAD` + незакоммиченные
+         изменения (та же схема дифф-контекста, что у regress-ворот).
+    """
+    env = os.environ.get("PR_CHANGED_FILES", "")
+    files: list[tuple[str | None, str]] = []
+    for line in env.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "\t" in line:
+            st, p = line.split("\t", 1)
+            st = st.strip()
+            files.append((st[:1] if st and re.fullmatch(r"[AMDTUR]", st[:1]) else None, p.strip()))
+        else:
+            files.append((None, line))
+    if files:
+        return files
+    raw: set[str] = set()
+    for base in ("main", "origin/main"):
+        out = _git(repo, "diff", "--name-status", f"{base}...HEAD")
+        if out:
+            raw.update(out.splitlines())
+    worktree = _git(repo, "diff", "--name-status", "HEAD")
+    if worktree:
+        raw.update(worktree.splitlines())
+    for line in raw:
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            st = parts[0].strip()[:1]
+            files.append((st if re.fullmatch(r"[AMDTUR]", st) else None, parts[1].strip()))
+        else:
+            files.append((None, line.strip()))
+    return files
+
+
+def impact_map_problem(repo: Path, change_id: str) -> str | None:
+    """J58: impact-карта change-пакета — openspec/changes/<id>/impact.md
+    ИЛИ секция «## Impact» в design.md/proposal.md."""
+    pkg = repo / "openspec" / "changes" / change_id
+    if (pkg / "impact.md").is_file():
+        return None
+    for name in ("design.md", "proposal.md"):
+        f = pkg / name
+        if f.is_file() and IMPACT_SECTION_RE.search(
+                f.read_text(encoding="utf-8", errors="replace")):
+            return None
+    return (
+        f"openspec/changes/{change_id}/impact.md: impact-карта отсутствует "
+        "(J58: обязательный артефакт СА — создай impact.md по шаблону "
+        "openspec/changes/_template/impact.md или добавь секцию "
+        "«## Impact» в design.md/proposal.md: затронутые сервисы / контракты / "
+        "статика (static_v?) / deploy-матрица + RUNBOOK / миграции / тесты)"
+    )
+
+
+def _head_files(repo: Path) -> list[str] | None:
+    """J58-fix (ревью-001 замечание 1): файлы HEAD-дерева — для exists-guard.
+
+    None — HEAD определить нельзя (не git-репо / нет коммитов / ошибка git):
+    exists-guard не применяется, требование работает как раньше
+    (консервативный DENY лучше молчаливого пропуска).
+    """
+    out = _git(repo, "ls-tree", "-r", "--name-only", "HEAD")
+    if out is None:
+        return None
+    return out.splitlines() if out else []
+
+
+def _require_paths_exist(paths: list[str], head_files: list[str]) -> bool:
+    """J58-fix: совпадает ли хотя бы один файл HEAD хотя бы с одним паттерном."""
+    for hf in head_files:
+        for pat in paths:
+            try:
+                if re.search(pat, hf):
+                    return True
+            except re.error:
+                continue
+    return False
+
+
+def check_impact_rules(repo: Path,
+                       files: list[tuple[str | None, str]]) -> list[str]:
+    """J58: механическая сверка диффа с правилами impact_rules.json.
+
+    Сработавшее правило (какой-либо путь диффа совпал с when[].path и —
+    если указан when[].status — статус совпал; неизвестный статус считается
+    совпавшим: консервативный DENY с подсказкой лучше молчаливого пропуска)
+    требует наличия в диффе хотя бы одного пути под каждым require[].path.
+    Расхождение = DENY: id правила + что ожидалось + hint.
+
+    Exists-guard (J58-fix, ревью-001 замечание 1): требование применяется
+    только к репо, где целевой артефакт существует в HEAD (продуктовый
+    проект). Если артефакта в HEAD нет (фабрика: нет contracts/openapi.json,
+    deploy/, backend/app/pages.py) — требование молчит: нельзя DENY-ить репо
+    за отсутствие артефакта, которого в этом репо не существует. Вне git
+    (HEAD не определён) guard не применяется — прежнее поведение.
+    """
+    errs: list[str] = []
+    head_files = _head_files(repo)
+    for rule in load_impact_rules(repo):
+        whens = rule["when"] if isinstance(rule["when"], list) else [rule["when"]]
+        triggered: list[str] = []
+        for st, p in files:
+            for w in whens:
+                if not isinstance(w, dict) or not w.get("path"):
+                    continue
+                try:
+                    if not re.search(w["path"], p):
+                        continue
+                except re.error:
+                    continue
+                req_status = w.get("status")
+                if req_status:
+                    statuses = (req_status if isinstance(req_status, list)
+                                else [req_status])
+                    if st is not None and st not in statuses:
+                        continue
+                triggered.append(p)
+                break
+        if not triggered:
+            continue
+        for req in rule["require"]:
+            if not isinstance(req, dict) or not req.get("path"):
+                continue
+            paths = req["path"] if isinstance(req["path"], list) else [req["path"]]
+            # J58-fix exists-guard: артефакта нет в HEAD этого репо — требование
+            # молчит (фабричные PR с contracts/-диффом не DENY-ятся за
+            # contracts/openapi.json, которого в фабрике не существует).
+            if head_files is not None and not _require_paths_exist(paths, head_files):
+                continue
+            found = False
+            for _, p in files:
+                for pat in paths:
+                    try:
+                        if re.search(pat, p):
+                            found = True
+                            break
+                    except re.error:
+                        continue
+                if found:
+                    break
+            if not found:
+                show = triggered[0] + ("…" if len(triggered) > 1 else "")
+                errs.append(
+                    f"J58: правило {rule['id']} ({rule.get('title', rule['id'])}): "
+                    f"дифф трогает {show}, но в диффе нет {req.get('label') or req['path']} "
+                    f"— {req.get('hint', 'добавь ожидаемый артефакт в дифф PR')}"
+                )
+    return errs
+
+
+def check_impact_gate(repo: Path, flow_type: str, change_id: str) -> list[str]:
+    """J58 CI-ворота: impact-карта + механическая сверка diff↔карта.
+
+    Для change-маркера ([change-id]) обязателен артефакт карты
+    (impact.md или секция «## Impact» в design.md/proposal.md);
+    для [chore]/[docs]/[ops]/[BUG-NNN] — только механическая сверка
+    правил (карта не требуется — не душить chore), расхождение диффа
+    с правилами = DENY для ЛЮБОГО маркера (обобщение J50).
+    """
+    errs: list[str] = []
+    if flow_type == "change":
+        cid_problem = _sc.change_id_problem(change_id)
+        if not cid_problem and (repo / "openspec" / "changes" / change_id).is_dir():
+            problem = impact_map_problem(repo, change_id)
+            if problem:
+                errs.append(problem)
+    errs.extend(check_impact_rules(repo, pr_changed_files(repo)))
+    return errs
+
+
 def check_ops(repo: Path, marker: str) -> list[str]:
     """[ops]: эксплуатационные работы (деплой, переключение, инфраструктура).
     Артефакт — протокол приемки Заказчика, не review-файл (контракт ops_task).
@@ -747,6 +962,14 @@ def main() -> int:
     # J50 CI-ворота: UI-дельта (frontend/**) + макеты (design/**) в change-пакете
     # ⇒ web-тесты обязательны, escape — [no-ui-tests] + основание в body.
     gate_errs = check_ui_tests_gate(repo, ident, marker_text)
+    if gate_errs:
+        for e in gate_errs:
+            print(f"pr_validate: {e}")
+        return 1
+
+    # J58 CI-ворота: impact-карта (change-маркер) + механическая сверка
+    # диффа с правилами scripts/impact_rules.json (любой маркер).
+    gate_errs = check_impact_gate(repo, flow_type, ident)
     if gate_errs:
         for e in gate_errs:
             print(f"pr_validate: {e}")

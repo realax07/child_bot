@@ -708,6 +708,27 @@ def _head_files(repo: Path) -> list[str] | None:
     return out.splitlines() if out else []
 
 
+def _head_before_files(repo: Path) -> list[str] | None:
+    """precision-fix (j58-ir02-precision): файлы дерева «до диффа» (HEAD-before).
+
+    Для new_dir-правил: коммитится ли дифф на ветке PR (main...HEAD) или это
+    незакоммиченные изменения (HEAD) — «до» всегда merge-base с main
+    (origin/main); для чисто рабочих изменений merge-base = HEAD, дерево то же.
+    None — дерево определить нельзя (не git-репо / нет main / ошибка git):
+    new_dir-фильтр не применяется, прежнее поведение (консервативный DENY).
+    Пустое дерево ([] — коммит без файлов) читается: любой каталог в нём
+    отсутствовал → правило срабатывает как прежде.
+    """
+    for base in ("main", "origin/main"):
+        mb = _git(repo, "merge-base", base, "HEAD")
+        if not mb:
+            continue
+        out = _git(repo, "ls-tree", "-r", "--name-only", mb)
+        if out is not None:
+            return out.splitlines()
+    return _head_files(repo)
+
+
 def _require_paths_exist(paths: list[str], head_files: list[str]) -> bool:
     """J58-fix: совпадает ли хотя бы один файл HEAD хотя бы с одним паттерном."""
     for hf in head_files:
@@ -736,26 +757,50 @@ def check_impact_rules(repo: Path,
     deploy/, backend/app/pages.py) — требование молчит: нельзя DENY-ить репо
     за отсутствие артефакта, которого в этом репо не существует. Вне git
     (HEAD не определён) guard не применяется — прежнее поведение.
+
+    new_dir-точность (precision-fix, j58-ir02-precision; дефект живого
+    ekotov PR #231): правило с флагом new_dir (например IR-02 «новый сервис
+    services/<name>/») срабатывает ТОЛЬКО если первый уровень каталога из
+    совпавшего пути ОТСУТСТВОВАЛ в дереве HEAD-before — иначе (новый файл
+    ВНУТРИ существующего сервиса, services/frontend/ уже в дереве) файл не
+    считается триггером. Если НИ ОДИН файл не прошёл фильтр — правило
+    молчит. Дерево HEAD-before не читается — прежнее поведение
+    (консервативный DENY лучше молчаливого пропуска).
     """
     errs: list[str] = []
     head_files = _head_files(repo)
+    head_before: list[str] | None = None
+    head_before_done = False
     for rule in load_impact_rules(repo):
         whens = rule["when"] if isinstance(rule["when"], list) else [rule["when"]]
+        new_dir_rule = bool(rule.get("new_dir"))
+        if new_dir_rule and not head_before_done:
+            head_before = _head_before_files(repo)  # лениво: только для new_dir-правил
+            head_before_done = True
         triggered: list[str] = []
         for st, p in files:
             for w in whens:
                 if not isinstance(w, dict) or not w.get("path"):
                     continue
                 try:
-                    if not re.search(w["path"], p):
-                        continue
+                    m = re.search(w["path"], p)
                 except re.error:
+                    continue
+                if not m:
                     continue
                 req_status = w.get("status")
                 if req_status:
                     statuses = (req_status if isinstance(req_status, list)
                                 else [req_status])
                     if st is not None and st not in statuses:
+                        continue
+                # new_dir-точность: каталог сервиса уже был в HEAD-before —
+                # файл не триггер нового сервиса (новый файл внутри
+                # существующего сервиса — не «новый сервис»).
+                if new_dir_rule and head_before is not None:
+                    seg = m.group(0).rstrip("/")
+                    if seg and any(hf.startswith(seg + "/")
+                                   for hf in head_before):
                         continue
                 triggered.append(p)
                 break

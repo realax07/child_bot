@@ -26,12 +26,20 @@ import session_check as _sc  # noqa: E402  (единая валидация chan
 # --- Наборы обязательных артефактов по типам (контракты) ---
 
 def check_bug(repo: Path, num: str) -> list[str]:
-    """Флоу 2: баг-репорт обязателен; после мержа — статус CLOSED."""
+    """Флоу 2: баг-репорт обязателен; после мержа — статус CLOSED.
+
+    Н5 (аудит 2026-10-23): контракт артефакта единый с flow_transition —
+    test-model/bugs/BUG-<id>.md ИЛИ BUG-<id>-<slug>.md
+    (flow_check.bug_report_paths); прежде здесь принимался только glob
+    с суффиксом, и файл BUG-001.md, прошедший переход Флоу 2, валил PR.
+    """
+    from flow_check import bug_report_paths  # noqa: E402  (единый контракт Н5)
     missing = []
     digits = re.sub(r"^BUG-", "", num)  # принимаем и "BUG-001", и "001"
-    bugs = list((repo / "test-model" / "bugs").glob(f"BUG-{digits}-*.md")) if (repo / "test-model" / "bugs").is_dir() else []
+    bugs = bug_report_paths(repo, num)
     if not bugs:
-        return [f"test-model/bugs/BUG-{digits}-*.md: баг-репорт отсутствует (контракт 6/правило 7)"]
+        return [f"test-model/bugs/BUG-{digits}.md (или BUG-{digits}-*.md): "
+                "баг-репорт отсутствует (контракт 6/правило 7)"]
     text = bugs[0].read_text(encoding="utf-8", errors="replace")
     # На момент PR статус может быть открыт; CLOSED требуется после мержа (проверяет отдельно post-merge job)
     if "Статус" not in text and "CLOSED" not in text:
@@ -192,12 +200,26 @@ def check_change(repo: Path, change_id: str, marker: str = "") -> list[str]:
 
 
 def check_chore(repo: Path, marker: str) -> list[str]:
-    """Флоу 4: обслуживание — минимальный набор, спека не меняется."""
+    """Флоу 4: обслуживание — минимальный набор, спека не меняется.
+
+    Н16 (аудит 2026-10-23): [chore] блокировал только openspec/ — продуктовый
+    код под [chore] проходил CI без ревью-артефактов (дыра ровно в классе
+    «ошибки выбора маркера»). Дифф продуктового кода (конвенция CI:
+    PR_CHANGED_CODE=1 — backend/frontend/services/src/e2e, т.е. вне
+    openspec/, docs/, tests/, scripts/) под [chore] = FAIL с подсказкой.
+    """
     # Запрет: chore не имеет права менять спеки (изменение as is только через change)
     changed_specs = os.environ.get("PR_CHANGED_SPECS", "")
     if changed_specs.strip() in ("1", "true"):
         return [
             "PR помечен [chore], но содержит изменения openspec/ — изменение as is только через change-пакет (контракт 7)"
+        ]
+    if os.environ.get("PR_CHANGED_CODE", "").strip() in ("1", "true"):
+        return [
+            "PR помечен [chore], но содержит изменения кода продукта "
+            "(backend/frontend/services/src/e2e; вне openspec/, docs/, "
+            "tests/, scripts/) — используй маркер [change-id]/[BUG-NNN] "
+            "(Н16: chore не прикрывает продуктовый код)"
         ]
     return []
 
@@ -708,6 +730,48 @@ def _head_files(repo: Path) -> list[str] | None:
     return out.splitlines() if out else []
 
 
+def _diff_patch(repo: Path) -> str | None:
+    """Патч диффа PR — для content_when-триггеров (IR-06, Н25).
+
+    None — патч нечитаем (не git-репо / ошибка git): content_when-фильтр НЕ
+    применяется — консервативный DENY лучше молчаливого пропуска. Пустая
+    строка — дифф пуст: content_when-regex не совпадает, правило молчит.
+    """
+    parts: list[str] = []
+    for base in ("main", "origin/main"):
+        out = _git(repo, "diff", f"{base}...HEAD")
+        if out is not None:
+            if out:
+                parts.append(out)
+            break
+    out = _git(repo, "diff", "HEAD")
+    if out is None and not parts:
+        return None
+    if out:
+        parts.append(out)
+    return "\n".join(parts)
+
+
+def _safe_search(pattern: str, text: str) -> bool:
+    try:
+        return bool(re.search(pattern, text))
+    except re.error:
+        return False
+
+
+def _pr_body_text() -> str | None:
+    """Тело PR для pr_body-требований (IR-05/06, Н20/Н25).
+
+    Источники: env PR_BODY (локальные прогоны/тесты) либо fetch_pr_info()
+    (CI: GITHUB_EVENT_PATH). None — PR-контекста нет: pr_body-требования
+    SKIP (нельзя DENY-ить то, что нечем проверить).
+    """
+    env = os.environ.get("PR_BODY")
+    if env is not None:
+        return env
+    return fetch_pr_info()
+
+
 def _head_before_files(repo: Path) -> list[str] | None:
     """precision-fix (j58-ir02-precision): файлы дерева «до диффа» (HEAD-before).
 
@@ -763,14 +827,28 @@ def check_impact_rules(repo: Path,
     services/<name>/») срабатывает ТОЛЬКО если первый уровень каталога из
     совпавшего пути ОТСУТСТВОВАЛ в дереве HEAD-before — иначе (новый файл
     ВНУТРИ существующего сервиса, services/frontend/ уже в дереве) файл не
-    считается триггером. Если НИ ОДИН файл не прошёл фильтр — правило
+    считается триггером. Если НИ ОДИН файл не прошел фильтр — правило
     молчит. Дерево HEAD-before не читается — прежнее поведение
     (консервативный DENY лучше молчаливого пропуска).
+
+    content_when (IR-06, Н25): если у сработавшего правила есть content_when
+    ({path, regex}), правило остается триггером только если патч диффа
+    файлов, чей путь совпал с cw.path, содержит cw.regex. Патч нечитаем —
+    фильтр не применяется (консервативно: требование действует).
+
+    pr_body-требования (АУД-4 хвост, Н20/Н25): require-запись с ключом
+    pr_body (без path) сверяется с ТЕЛОМ PR (env PR_BODY или
+    fetch_pr_info/GITHUB_EVENT_PATH — тот же источник, что читает маркер):
+    regex не найден в теле → DENY с hint из правила; PR-контекста нет →
+    SKIP (требование молчит — advisory-прогон остается у
+    flow_preflight check pr-body).
     """
     errs: list[str] = []
     head_files = _head_files(repo)
     head_before: list[str] | None = None
     head_before_done = False
+    patch: str | None = None  # лениво: только для content_when-правил
+    patch_done = False
     for rule in load_impact_rules(repo):
         whens = rule["when"] if isinstance(rule["when"], list) else [rule["when"]]
         new_dir_rule = bool(rule.get("new_dir"))
@@ -806,8 +884,47 @@ def check_impact_rules(repo: Path,
                 break
         if not triggered:
             continue
+        # content_when (IR-06, Н25): уточнение триггера по содержимому патча.
+        # Патч нечитаем (None) — фильтр не применяется (консервативный DENY).
+        content_whens = [w for w in (rule.get("content_when") or [])
+                         if isinstance(w, dict) and w.get("regex")]
+        if content_whens:
+            if not patch_done:
+                patch = _diff_patch(repo)
+                patch_done = True
+            if patch is not None:
+                content_ok = True
+                for cw in content_whens:
+                    scope = patch
+                    if cw.get("path"):
+                        chunks = [c for c in patch.split("diff --git ")
+                                  if _safe_search(cw["path"], c.split("\n", 1)[0])]
+                        scope = "\n".join(chunks)
+                    if not _safe_search(cw["regex"], scope):
+                        content_ok = False
+                        break
+                if not content_ok:
+                    continue
         for req in rule["require"]:
-            if not isinstance(req, dict) or not req.get("path"):
+            if not isinstance(req, dict):
+                continue
+            # АУД-4 хвост (Н20/Н25): pr_body-требование — regex на ТЕЛО PR
+            # (env PR_BODY / fetch_pr_info), не на пути диффа. Нет PR-контекста
+            # — SKIP (advisory-прогон остается за flow_preflight check pr-body).
+            if req.get("pr_body"):
+                body = _pr_body_text()
+                if body is None:
+                    continue
+                if not _safe_search(req["pr_body"], body):
+                    show = triggered[0] + ("…" if len(triggered) > 1 else "")
+                    errs.append(
+                        f"J58: правило {rule['id']} ({rule.get('title', rule['id'])}): "
+                        f"дифф трогает {show}, но в теле PR нет "
+                        f"«{req.get('label') or req['pr_body']}» "
+                        f"— {req.get('hint', 'добавь требуемое в тело PR')}"
+                    )
+                continue
+            if not req.get("path"):
                 continue
             paths = req["path"] if isinstance(req["path"], list) else [req["path"]]
             # J58-fix exists-guard: артефакта нет в HEAD этого репо — требование

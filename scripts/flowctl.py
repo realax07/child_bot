@@ -103,6 +103,7 @@ import flow_mode  # noqa: E402
 import flow_state  # noqa: E402
 import flow_transition as ft  # noqa: E402
 import gate_runner as gr  # noqa: E402
+import pm_bounds_check as pmb  # noqa: E402  (Н14: J3-префиксы защищенных путей)
 import role_zone_policy as rzp  # noqa: E402
 import session_check as sc  # noqa: E402
 
@@ -124,6 +125,70 @@ PHASE_COMPLETED_STATUSES = ("accepted", "returned")
 # СУЗИТЬ политику роли: запрос пути вне политики — отказ с перечнем
 # недопустимых путей; сужение — прозрачно (выводит фактические зоны).
 ZONE_OUTSIDE_POLICY = "ZONE_OUTSIDE_POLICY"
+
+# ------------------------------------------- Н14: protected-paths (J3) ворот
+# Аудит Н14: protected-paths ворота prepare всегда видели пустой список путей
+# (он заполнялся из зоны --path, а зона-паттерн «deploy/**» не выглядит
+# защищенным путем) — ворота молча проходили. Флаг --paths (через запятую)
+# подает КОНКРЕТНЫЕ пути изменения в protected-paths ворота: пересечение с
+# защищенными префиксами (J3/J26: openspec/specs/, contracts/, AGENTS.md,
+# agents/README.md, deploy/, RUNBOOK.md) без [pipeline]-маркера — DENY
+# ДО side effects (reservation/worktree/goal не создаются).
+J3_PROTECTED_PREFIXES = tuple(pmb.PROTECTED_PATHS) + tuple(pmb.DEPLOY_PATHS)
+J3_PROTECTED_REASON = "J3_PROTECTED_PATHS"
+
+
+def parse_paths_arg(raw: str | None) -> list[str]:
+    """--paths «deploy/x, src/a.py» → список канонических путей (Н14)."""
+    return [sc.canonical(p) for p in (raw or "").split(",") if p.strip()]
+
+
+def protected_path_hits(paths: list[str]) -> list[str]:
+    """Пути запроса, попадающие в защищенные префиксы (J3/J26)."""
+    hits: list[str] = []
+    for p in paths or []:
+        if any(p == pe.rstrip("/") or p.startswith(pe)
+               for pe in J3_PROTECTED_PREFIXES):
+            hits.append(p)
+    return hits
+
+
+# ------------------------------------------------ Н12: диагностика scope
+# Аудит Н12: AMBIGUOUS_STATE без диагностики — вызывающий не видит, КАКОЕ
+# поле scope невалидно. Здесь — конкретное указание поля по формату флоу
+# (flow_state.FLOW_EXPECTATIONS): «scope=xxx не соответствует формату
+# Флоу 3 (BUG-NNN)». Невалидный --flow ловится до inspect и отдается
+# JSON-диагностикой (не сырым argparse).
+
+
+def ambiguous_field_hints(scope: dict) -> list[str]:
+    """Конкретные невалидные поля scope для AMBIGUOUS_STATE (Н12)."""
+    scope = scope or {}
+    flow = scope.get("flow")
+    change = str(scope.get("change") or "")
+    if flow not in flow_state.FLOW_IDS:
+        return [f"flow={flow!r} вне допустимых 1–5 "
+                "(ожидается целое число 1–5)"]
+    hints: list[str] = []
+    if flow in (2, 3) and not flow_state.BUG_ID_RE.match(change):
+        hints.append(f"scope={change} не соответствует формату "
+                     f"Флоу {flow} (BUG-NNN, например BUG-042)")
+    elif flow == 1 and not flow_state.CHANGE_ID_RE.match(change):
+        hints.append(f"scope={change} не соответствует формату Флоу 1 "
+                     "(kebab-case change-id, например add-widget)")
+    elif flow == 4 and not flow_state.CHORE_RE.match(change):
+        hints.append(f"scope={change} не соответствует формату Флоу 4 "
+                     "([chore])")
+    elif flow == 5 and not flow_state.CHANGE_ID_RE.match(change):
+        hints.append(f"scope={change} не соответствует формату Флоу 5 "
+                     "(change-id)")
+    return hints
+
+
+def _decision_has_ambiguous(decision: ft.Decision) -> bool:
+    parts = [str(x) for x in
+             list(decision.blocking_reasons) + list(decision.details)]
+    return any(ft.AMBIGUOUS_STATE in p for p in parts)
 
 
 def zone_policy_check(role: str, requested: list) -> dict:
@@ -381,7 +446,8 @@ def _build_action(args, repo: Path, flow: int) -> ft.ActionRequest:
         dependency_evidence=dep_ev,
         spec_delta=args.spec_delta,
         incident_ref=args.incident_ref,
-        paths=tuple(args.zone or ()),
+        paths=tuple(list(args.zone or ())
+                    + parse_paths_arg(getattr(args, "paths", None))),
         pipeline_marker=args.pipeline_marker,
         rules_change=args.rules_change,
         small_change=args.small_change,
@@ -390,6 +456,49 @@ def _build_action(args, repo: Path, flow: int) -> ft.ActionRequest:
 
 def _status_exit(status: str) -> int:
     return {ft.ALLOW: 0, ft.DENY: 1}.get(status, 2)
+
+
+# ------------------------------------------------- Н7: устаревшие держатели зоны
+# Аудит Н7: finished-сессия (работа не влита, вердикт returned) продолжает
+# держать зону — следующий prepare по ней = ZONE_CONFLICT без выхода. Здесь:
+# (1) диагностика — перечень таких держателей с ГОТОВОЙ командой
+# авто-освобождения (flowctl release); (2) флаг --release-stale — явное
+# разрешение prepare автоматически перевести их в released (expect_from под
+# локом, ничего не удаляется) и повторить резервацию.
+
+
+def find_stale_returned_holders(registry_path: Path, state_path: Path,
+                                zones: list[str]) -> list[dict]:
+    """finished-сессии, держащие пересекаемую зону, чей вердикт returned."""
+    data, err = sc.registry_load(registry_path)
+    if err:
+        return []
+    state = state_load(state_path)
+    want = [sc.canonical(p) for p in (zones or [])]
+    out: list[dict] = []
+    for s in data.get("sessions", []):
+        if not isinstance(s, dict) or s.get("status") != "finished":
+            continue
+        other = [sc.canonical(p) for p in
+                 (s.get("zones") or s.get("paths") or [])]
+        if not sc.zones_overlap(want, other):
+            continue
+        rec = next((r for r in state.get("runs", {}).values()
+                    if isinstance(r, dict)
+                    and r.get("delegation_id") == s.get("delegation_id")),
+                   None)
+        if rec is None or rec.get("status") != "returned":
+            continue
+        cid = str(rec.get("correlation_id") or "")
+        out.append({
+            "delegation_id": s.get("delegation_id"),
+            "correlation_id": cid,
+            "verdict": "returned",
+            "zones": other,
+            "release_cmd": (f"flowctl.py release {cid} "
+                            f"--registry {registry_path} --state {state_path}"),
+        })
+    return out
 
 
 # ------------------------------------------------- ветка (J52-w1.1: деривация)
@@ -473,6 +582,12 @@ def cmd_prepare(args) -> int:
         return 2
     action = _build_action(args, repo, args.flow)
     decision = ft.check_action(snapshot, action)
+    # Н12: AMBIGUOUS_STATE — диагностика указывает КОНКРЕТНОЕ невалидное
+    # поле scope (формат идентификатора выбранного флоу), а не абстрактный
+    # «неоднозначный scope».
+    amb_hints = (ambiguous_field_hints(snapshot.get("scope", {}))
+                 if decision.status != ft.ALLOW
+                 and _decision_has_ambiguous(decision) else [])
 
     # 1a) P0.3: сужение --zone до политики роли (agents/README.md). CLI
     #     не может расширить политику: запрос пути вне зоны роли — отказ
@@ -488,6 +603,9 @@ def cmd_prepare(args) -> int:
     # не обрезка до 8 символов (шов пилота J51 #1: коллизии префиксов).
     derived_branch = args.branch or (
         branch_name_for(correlation) if args.create_worktree else None)
+    # Н14: явный список путей изменения для protected-paths (J3) ворот.
+    gate_paths = parse_paths_arg(getattr(args, "paths", None))
+    protected_hits = protected_path_hits(gate_paths)
     plan = {
         "role": args.role,
         "action": args.action,
@@ -502,8 +620,29 @@ def cmd_prepare(args) -> int:
         "branch": derived_branch,
         "gates": decision.required_gates,
         "human_gate": _approval_summary(args.approval_ref),
+        "protected_paths_probe": gate_paths,
         "decision": decision.to_dict(),
     }
+
+    # 1a-Н14) protected-paths (J3) ворота prepare: конкретные пути изменения
+    #     берутся из --paths (через запятую), а не молча из зоны. Пересечение
+    #     с защищенными префиксами без [pipeline]-маркера — отказ ДО side
+    #     effects (reservation/worktree/goal не создаются).
+    if protected_hits and not args.pipeline_marker:
+        _emit({
+            "schema_version": OUTPUT_SCHEMA, "command": "prepare",
+            "correlation_id": correlation, "prepared": False,
+            "reason": J3_PROTECTED_REASON,
+            "protected_paths": protected_hits,
+            "protected_prefixes": list(J3_PROTECTED_PREFIXES),
+            "note": "изменение защищенных путей ("
+                    + ", ".join(protected_hits)
+                    + ") требует [pipeline]-маркер в subject (J3; "
+                      "pm_bounds_check; ТЗ 03 п.5) — reservation не "
+                      "создавалась; --paths — явный список путей изменения "
+                      "для protected-paths ворот (Н14)",
+        }, args.as_json)
+        return 1
 
     # 1b) P0.3: запрос пути вне политики роли — отказ ДО side effects
     #     (записи в реестре/state нет, reservation не создается).
@@ -533,6 +672,7 @@ def cmd_prepare(args) -> int:
             "adapter": ADAPTER, "prepared": decision.allowed,
             "mode": flow_mode.get_mode(),
             **plan,
+            "field_diagnostics": amb_hints,
             "note": "dry-run: snapshot/reservation/worktree/goal НЕ созданы",
         }, args.as_json)
         return _status_exit(decision.status)
@@ -608,6 +748,7 @@ def cmd_prepare(args) -> int:
                 "schema_version": OUTPUT_SCHEMA, "command": "prepare",
                 "correlation_id": correlation, "prepared": False,
                 "mode": flow_mode.get_mode(), "reason": decision.status,
+                "field_diagnostics": amb_hints,
                 "record": record,
                 "note": "enforcing: решение "
                         f"{decision.status} запрещает подготовку (blocks_on)"
@@ -617,6 +758,7 @@ def cmd_prepare(args) -> int:
             _emit({
                 "schema_version": OUTPUT_SCHEMA, "command": "prepare",
                 "correlation_id": correlation, "prepared": False,
+                "field_diagnostics": amb_hints,
                 "record": record,
                 "note": "действие не разрешено (ALLOW обязателен) — "
                         "reservation/worktree/goal не создавались",
@@ -673,13 +815,80 @@ def cmd_prepare(args) -> int:
         "snapshot_digest": snapshot["snapshot_digest"],
     }, registry_path)
     if not res["allowed"]:
-        _emit({
-            "schema_version": OUTPUT_SCHEMA, "command": "prepare",
-            "correlation_id": correlation, "prepared": False,
-            "reservation": res,
-            "note": "reservation отклонена — сессия не создана",
-        }, args.as_json)
-        return 1
+        # Н7: ZONE_CONFLICT с finished-сессией, вердикт которой returned
+        # (работа не влита) — зона держится мертвой записью. В диагностике —
+        # перечень таких держателей с готовой командой авто-освобождения;
+        # флаг --release-stale разрешает автоматический reconcile (release +
+        # повторная резервация) прямо в этом prepare.
+        stale_holders: list[dict] = []
+        released_stale: list[str] = []
+        if res.get("reason") == sc.ZONE_CONFLICT:
+            stale_holders = find_stale_returned_holders(
+                registry_path, state_path, zones)
+            if stale_holders and getattr(args, "release_stale", False):
+                for holder in stale_holders:
+                    tr = registry_transition(
+                        registry_path, holder["delegation_id"], "released",
+                        "prepare --release-stale: finished-сессия с вердиктом "
+                        "returned (работа не влита) держит зону — "
+                        "авто-освобождение (Н7)",
+                        f"prepare {correlation}: авто-reconcile держателя "
+                        f"{holder['delegation_id']}",
+                        expect_from="finished")
+                    if not tr.get("ok"):
+                        continue
+                    released_stale.append(holder["delegation_id"])
+                    cid_h = holder["correlation_id"]
+
+                    def _mutate_release(st: dict, _cid: str = cid_h) -> None:
+                        r = st["runs"].get(_cid)
+                        if r is None:
+                            return
+                        r["status"] = "released"
+                        r.setdefault("lifecycle", {}).setdefault(
+                            "history", []).append({
+                                "at": gr.utcnow_iso(), "from": "returned",
+                                "to": "released",
+                                "reason": "prepare --release-stale (Н7): "
+                                          "зона освобождена новым prepare",
+                                "evidence": f"prepare {correlation}"})
+
+                    state_write_locked(
+                        state_path, state_load(state_path), _mutate_release)
+                if released_stale:
+                    res = sc.reserve({
+                        "repo": str(repo),
+                        "delegation_id": delegation_id,
+                        "role": args.role,
+                        "project": args.project,
+                        "owner_pm": args.owner_pm,
+                        "paths": zones,
+                        "policy_version": policy_version,
+                        "worktree": worktree,
+                        "branch": derived_branch,
+                        "base_sha": _git_head(base_tree),
+                        "snapshot_digest": snapshot["snapshot_digest"],
+                    }, registry_path)
+        if not res["allowed"]:
+            _emit({
+                "schema_version": OUTPUT_SCHEMA, "command": "prepare",
+                "correlation_id": correlation, "prepared": False,
+                "reservation": res,
+                "stale_holders": stale_holders,
+                "released_stale": released_stale,
+                "note": "reservation отклонена — сессия не создалась"
+                        + ("; зону держат finished-сессии с вердиктом "
+                           "returned (работа не влита) — освободи явным "
+                           "release (команды в stale_holders) или повтори "
+                           "prepare с --release-stale (Н7)"
+                           if stale_holders else ""),
+            }, args.as_json)
+            return 1
+        if released_stale:
+            warnings.append(
+                "RELEASED_STALE (Н7): авто-освобождены finished-сессии с "
+                "вердиктом returned, державшие зону: "
+                + ", ".join(released_stale))
 
     # 7) Переснимок ПОСЛЕ reservation: registry_digest входит в snapshot
     #    digest; run сравнивается с этим «осевшим» значением (иначе ложный
@@ -951,7 +1160,7 @@ def cmd_finish(args) -> int:
             "note": "вердикт уже вынесен; повтор не выполняется",
         }, args.as_json)
         return {"accepted": 0, "returned": 1}[record["status"]]
-    if record["status"] != "running":
+    if record["status"] not in ("running", "provisional"):
         # Повторная приемка blocked-сессии — только по явному решению ПМ
         # (--pm-resume): сценарий «blocked по конфигурационной ошибке
         # запускающего» (например, первый finish без --pm-mode — gate ERROR
@@ -1136,6 +1345,22 @@ def cmd_finish(args) -> int:
     else:
         verdict = "returned"
 
+    # Н6: pr_validate SKIPPED (нет PR-контекста: ни --pr-id, ни
+    # GITHUB_EVENT_PATH) — вердикт НЕ финализируется. SKIPPED не считается
+    # пройденным, но и дефектом работы агента не является: сессия остается
+    # открытой (provisional), повторный finish с появившимся --pr-id
+    # пересчитывает ворота и финализирует вердикт.
+    pr_skipped = [g for g in gate_report.get("gates", [])
+                  if g.get("gate_id") == "pr_validate"
+                  and g.get("status") == gr.STATUS_SKIPPED]
+    provisional_reason = None
+    if pr_skipped and verdict in ("accepted", "returned"):
+        verdict = "provisional"
+        provisional_reason = (
+            "pr_validate SKIPPED (нет PR-контекста: --pr-id / "
+            "GITHUB_EVENT_PATH) — вердикт не финализируется (Н6); "
+            "повторный finish с --pr-id пересчитает и финализирует")
+
     executed_gates = {
         g["gate_id"]: {"status": g["status"], "exit_code": g["exit_code"],
                        "digest": g["input_digest"],
@@ -1175,6 +1400,37 @@ def cmd_finish(args) -> int:
                     "accepted (P0.2): сессия не закрыта, обязательные gates "
                     f"({', '.join(required)}) подлежат полному прогону; "
                     "вердикт выносит ПМ после разбора",
+        }, args.as_json)
+        return 2
+
+    if verdict == "provisional":
+        # Н6: вердикт НЕ финализируется — сессия остается открытой (running
+        # в реестре, зона удерживается), state хранит provisional-снимок.
+        # Повторный finish (с --pr-id или после появления PR-контекста)
+        # перезапускает ворота и выносит финальный вердикт.
+        def _mutate_prov(st: dict) -> None:
+            rec = st["runs"][args.correlation_id]
+            rec["status"] = "provisional"
+            rec["provisional"] = {
+                "at": gr.utcnow_iso(),
+                "reason": provisional_reason,
+                "skipped_gates": [g.get("gate_id") for g in pr_skipped],
+                "gates_overall": gate_report["overall"],
+                "defects": defects,
+            }
+            record.update(rec)
+
+        state_write_locked(state_path, state, _mutate_prov)
+        _emit({
+            "schema_version": OUTPUT_SCHEMA, "command": "finish",
+            "correlation_id": args.correlation_id,
+            "verdict": "provisional", "provisional": True,
+            "skipped_gates": [g.get("gate_id") for g in pr_skipped],
+            "gates_executed": executed_gates, "gates_digest": gates_digest,
+            "defects": defects, "record": record,
+            "note": (provisional_reason or "pr_validate SKIPPED")
+                    + "; сессия НЕ закрыта (running в реестре) — повтори "
+                      "finish с --pr-id <N>",
         }, args.as_json)
         return 2
 
@@ -2269,8 +2525,10 @@ def main(argv: list[str] | None = None) -> int:
     def add_scope(p):
         p.add_argument("--repo", required=True)
         p.add_argument("--project", required=True)
-        p.add_argument("--flow", required=True, type=int,
-                       choices=flow_state.FLOW_IDS)
+        # Н12: --flow валидируется ЯВНО (JSON-диагностика FLOW_ID_INVALID),
+        # не сырым argparse (choices печатали usage в stderr без контекста).
+        p.add_argument("--flow", required=True,
+                       help="номер флоу 1–5 (целое)")
         p.add_argument("--change", required=True)
         p.add_argument("--task", default=None)
         p.add_argument("--registry", default=None,
@@ -2292,6 +2550,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--pipeline-marker", action="store_true")
         p.add_argument("--rules-change", action="store_true")
         p.add_argument("--small-change", action="store_true")
+        p.add_argument("--paths", default=None,
+                       help="пути изменения для protected-paths ворот (J3), "
+                            "через запятую (Н14: без --paths ворота видели "
+                            "только зону и молча проходили)")
 
     p_pre = sub.add_parser("prepare", help="подготовить session/worktree/goal")
     add_scope(p_pre)
@@ -2308,6 +2570,12 @@ def main(argv: list[str] | None = None) -> int:
     p_pre.add_argument("--branch", default=None)
     p_pre.add_argument("--goal-path", default=None)
     p_pre.add_argument("--audit", default=None, help="audit JSONL")
+    p_pre.add_argument(
+        "--release-stale", action="store_true",
+        help="Н7: при ZONE_CONFLICT с finished-сессией, вердикт которой "
+             "returned (работа не влита), — автоматически освободить ее "
+             "(release) и повторить резервацию; без флага в диагностике "
+             "печатаются готовые release-команды (stale_holders)")
     p_pre.set_defaults(func=cmd_prepare)
 
     p_run = sub.add_parser("run", help="разрешить и отметить старт (идемпотентно)")
@@ -2366,8 +2634,9 @@ def main(argv: list[str] | None = None) -> int:
         "phase", help="последний завершенный этап scope (память фазы)")
     p_ph.add_argument("--repo", required=True)
     p_ph.add_argument("--project", required=True)
-    p_ph.add_argument("--flow", required=True, type=int,
-                      choices=flow_state.FLOW_IDS)
+    # Н12: валидация --flow явная (см. add_scope).
+    p_ph.add_argument("--flow", required=True,
+                      help="номер флоу 1–5 (целое)")
     p_ph.add_argument("--scope", required=True,
                       help="идентификатор scope (change/BUG-NNN/slug)")
     p_ph.add_argument("--registry", default=None)
@@ -2460,6 +2729,31 @@ def main(argv: list[str] | None = None) -> int:
     p_int.set_defaults(func=cmd_integrate)
 
     args = ap.parse_args(argv)
+
+    # Н12: невалидный --flow — машиночитаемая JSON-диагностика (с --json),
+    # не сырой argparse-usage в stderr.
+    if getattr(args, "flow", None) is not None:
+        raw_flow = args.flow
+        try:
+            args.flow = int(raw_flow)
+        except (TypeError, ValueError):
+            args.flow = None
+        if args.flow not in flow_state.FLOW_IDS:
+            _emit({
+                "schema_version": OUTPUT_SCHEMA,
+                "command": args.command,
+                "error": "FLOW_ID_INVALID",
+                "field": "--flow",
+                "value": str(raw_flow),
+                "expected": "целое 1–5",
+                "field_diagnostics": [f"flow={raw_flow!r} не соответствует "
+                                      "формату (--flow N, N ∈ 1–5)"],
+                "note": "невалидный --flow — укажи целое 1–5 "
+                        "(флоу 1 change / 2 bugfix / 3 хотфикс / 4 chore / "
+                        "5 экспресс)",
+            }, getattr(args, "as_json", False))
+            return 2
+
     return args.func(args)
 
 

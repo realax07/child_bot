@@ -362,6 +362,29 @@ def sdd_fact(repo: Path, problems: list) -> Fact:
     return Fact("sdd.present", True, "sdd.md", "", fp, CONFIDENCE_VERIFIED, STATUS_READY)
 
 
+def sdd_skip_fact(repo: Path, problems: list) -> Fact:
+    """Факт явного skip-решения по SDD (P17, реш. 2026-10-08-arch-review-policy).
+
+    Источник — sdd-skip.md в корне репо (рядом с sdd.md). Skip действителен
+    только с указанием КТО решил: строка «approved_by: <роль/имя>». Файл без
+    approved_by — STATUS_INVALID (skip-решение без автора не решение).
+    Отсутствующий файл — не проблема: это нормальный путь «SDD есть/требуется».
+    """
+    rel = "sdd-skip.md"
+    text, fp = safe_read(repo, rel, problems)
+    if text is None:
+        had_problem = any(p.source == rel for p in problems)
+        return Fact("sdd.approved_skip", None, rel, "", "", CONFIDENCE_UNKNOWN,
+                    STATUS_UNKNOWN if had_problem else STATUS_MISSING)
+    m = re.search(r"^approved_by:\s*(\S.*)$", text, re.M | re.I)
+    who = m.group(1).strip() if m else ""
+    if not who:
+        return Fact("sdd.approved_skip", None, rel, "", str(fp or ""),
+                    CONFIDENCE_VERIFIED, STATUS_INVALID)
+    return Fact("sdd.approved_skip", {"approved_by": who}, rel, "", fp,
+                CONFIDENCE_VERIFIED, STATUS_READY)
+
+
 def test_model_fact(repo: Path, problems: list) -> Fact:
     rel = "test-model"
     d = repo / rel
@@ -885,6 +908,7 @@ def inspect(
     facts.append(requirements_fact(repo, problems))
     facts.append(specs_fact(repo, problems))
     facts.append(sdd_fact(repo, problems))
+    facts.append(sdd_skip_fact(repo, problems))
     facts.append(test_model_fact(repo, problems))
     facts.extend(change_facts(repo, change_id, problems))
     facts.append(reviews_fact(repo, change_id, problems))

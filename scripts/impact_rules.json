@@ -1,70 +1,127 @@
 {
-  "version": 1,
-  "description": "J58: расширяемые правила механической сверки diff→требование (impact-гейт pr_validate.py). Правило: when — условия срабатывания (path — регэксп пути диффа, status — необязательный git-статус 'A'|'M'|'D' из `git diff --name-status`); require — требования к диффу сработавшего правила (path — регэксп, хотя бы один путь диффа должен совпасть; label — человекочитаемое имя ожидаемого артефакта; hint — подсказка в DENY). Exists-guard (J58-fix): требование применяется только к репо, где целевой артефакт существует в HEAD (продуктовый проект); нет артефакта в HEAD (фабрика без contracts/openapi.json, deploy/, backend/) — правило молчит. new_dir (precision-fix, j58-ir02-precision): флаг на правиле — срабатывание только если первый уровень каталога из совпавшего пути (например services/<name>/ для '^services/[^/]+/') ОТСУТСТВОВАЛ в дереве HEAD-before (merge-base с main — до диффа PR); каталог уже есть (новый файл внутри существующего сервиса) — правило молчит. Дерево HEAD-before не читается — прежнее поведение (консервативный DENY). Расхождение = DENY с id правила и hint. Добавление правила = правка этого файла, код ворот не меняется.",
-  "rules": [
+ "version": 1,
+ "description": "J58: расширяемые правила механической сверки diff→требование (impact-гейт pr_validate.py). Правило: when — условия срабатывания (path — регэксп пути диффа, status — необязательный git-статус 'A'|'M'|'D' из `git diff --name-status`); require — требования к диффу сработавшего правила (path — регэксп, хотя бы один путь диффа должен совпасть; label — человекочитаемое имя ожидаемого артефакта; hint — подсказка в DENY). Exists-guard (J58-fix): требование применяется только к репо, где целевой артефакт существует в HEAD (продуктовый проект); нет артефакта в HEAD (фабрика без contracts/openapi.json, deploy/, backend/) — правило молчит. new_dir (precision-fix, j58-ir02-precision): флаг на правиле — срабатывание только если первый уровень каталога из совпавшего пути (например services/<name>/ для '^services/[^/]+/') ОТСУТСТВОВАЛ в дереве HEAD-before (merge-base с main — до диффа PR); каталог уже есть (новый файл внутри существующего сервиса) — правило молчит. Дерево HEAD-before не читается — прежнее поведение (консервативный DENY). Расхождение = DENY с id правила и hint. Добавление правила = правка этого файла, код ворот не меняется. АУД-4 расширение схемы (Н20/Н25): require-запись может нести pr_body (регэксп тела PR, вместо path) — DENY-ворота check_impact_rules (pr_validate.py, АУД-4 хвост волна 4) проверяют pr_body против ТЕЛА PR (env PR_BODY или fetch_pr_info/GITHUB_EVENT_PATH): regex не найден — DENY с hint из правила; PR-контекста нет — SKIP. scripts/flow_preflight.py check pr-body — та же механика advisory (WARN) в точке диспетчеризации. Уточнение триггера content_when (список {path, regex}): правило срабатывает только если патч диффа файла, чей путь совпал с path, содержит regex — content_when читают оба слоя (ворота по git diff, патч нечитаем — консервативно требование действует; flow_preflight — в точке диспетчеризации).",
+ "rules": [
+  {
+   "id": "IR-01",
+   "title": "контракт изменился — openapi.json перегенерирован",
+   "when": [
     {
-      "id": "IR-01",
-      "title": "контракт изменился — openapi.json перегенерирован",
-      "when": [
-        {"path": "^services/[^/]+/openapi"},
-        {"path": "^contracts/"}
-      ],
-      "require": [
-        {
-          "path": "^contracts/openapi\\.json$",
-          "label": "contracts/openapi.json",
-          "hint": "перегенерируй contracts/openapi.json (урок релиза weather: неперегенерированный контракт = FAIL regress-final, круг зря)"
-        }
-      ]
+     "path": "^services/[^/]+/openapi"
     },
     {
-      "id": "IR-02",
-      "title": "новый сервис — deploy-матрица и RUNBOOK",
-      "new_dir": true,
-      "when": [
-        {"path": "^services/[^/]+/", "status": "A"}
-      ],
-      "require": [
-        {
-          "path": "^deploy/deploy\\.sh$",
-          "label": "deploy/deploy.sh",
-          "hint": "новый сервис должен попасть в deploy-матрицу deploy/deploy.sh (урок релиза weather-1: deploy.sh не знал сервис — вскрылось при деплое)"
-        },
-        {
-          "path": "^deploy/RUNBOOK\\.md$",
-          "label": "deploy/RUNBOOK.md",
-          "hint": "опиши новый сервис в deploy/RUNBOOK.md"
-        }
-      ]
-    },
-    {
-      "id": "IR-03",
-      "title": "статика фронта изменилась — bump static_v",
-      "when": [
-        {"path": "^frontend/.*(?:static|templates)"},
-        {"path": "^services/[^/]+/frontend/.*(?:static|templates)"}
-      ],
-      "require": [
-        {
-          "path": "^backend/app/pages\\.py$",
-          "label": "backend/app/pages.py (static_v)",
-          "hint": "подними static_v в backend/app/pages.py (урок релиза video-1.1: static_v не забамплен — девопс остановил деплой)"
-        }
-      ]
-    },
-    {
-      "id": "IR-04",
-      "title": "миграция — упоминание в RUNBOOK",
-      "when": [
-        {"path": "(^|/)migrate_[^/]*\\.py$"}
-      ],
-      "require": [
-        {
-          "path": "^deploy/RUNBOOK\\.md$",
-          "label": "deploy/RUNBOOK.md (упоминание миграции)",
-          "hint": "добавь миграцию в deploy/RUNBOOK.md (порядок применения/отката)"
-        }
-      ]
+     "path": "^contracts/"
     }
-  ]
+   ],
+   "require": [
+    {
+     "path": "^contracts/openapi\\.json$",
+     "label": "contracts/openapi.json",
+     "hint": "перегенерируй contracts/openapi.json (урок релиза weather: неперегенерированный контракт = FAIL regress-final, круг зря)"
+    }
+   ]
+  },
+  {
+   "id": "IR-02",
+   "title": "новый сервис — deploy-матрица и RUNBOOK",
+   "new_dir": true,
+   "when": [
+    {
+     "path": "^services/[^/]+/",
+     "status": "A"
+    }
+   ],
+   "require": [
+    {
+     "path": "^deploy/deploy\\.sh$",
+     "label": "deploy/deploy.sh",
+     "hint": "новый сервис должен попасть в deploy-матрицу deploy/deploy.sh (урок релиза weather-1: deploy.sh не знал сервис — вскрылось при деплое)"
+    },
+    {
+     "path": "^deploy/RUNBOOK\\.md$",
+     "label": "deploy/RUNBOOK.md",
+     "hint": "опиши новый сервис в deploy/RUNBOOK.md"
+    }
+   ]
+  },
+  {
+   "id": "IR-03",
+   "title": "статика фронта изменилась — bump static_v",
+   "when": [
+    {
+     "path": "^frontend/.*(?:static|templates)"
+    },
+    {
+     "path": "^services/[^/]+/frontend/.*(?:static|templates)"
+    }
+   ],
+   "require": [
+    {
+     "path": "^backend/app/pages\\.py$",
+     "label": "backend/app/pages.py (static_v)",
+     "hint": "подними static_v в backend/app/pages.py (урок релиза video-1.1: static_v не забамплен — девопс остановил деплой)"
+    }
+   ]
+  },
+  {
+   "id": "IR-04",
+   "title": "миграция — упоминание в RUNBOOK",
+   "when": [
+    {
+     "path": "(^|/)migrate_[^/]*\\.py$"
+    }
+   ],
+   "require": [
+    {
+     "path": "^deploy/RUNBOOK\\.md$",
+     "label": "deploy/RUNBOOK.md (упоминание миграции)",
+     "hint": "добавь миграцию в deploy/RUNBOOK.md (порядок применения/отката)"
+    }
+   ]
+  },
+  {
+   "id": "IR-05",
+   "title": "деплой-образ меняется — верификация сборкой, не маунтом",
+   "when": [
+    {
+     "path": "^services/[^/]+/Dockerfile"
+    },
+    {
+     "path": "^deploy/.*/Dockerfile"
+    }
+   ],
+   "require": [
+    {
+     "pr_body": "docker\\s+build",
+     "label": "docker build (команда/лог сборки образа)",
+     "hint": "в теле PR приведи docker build (команду/лог) — деплой-конфиг верифицируется сборкой образа, не стенд-маунтом (Н20; урок БАГ-5: games-proxy-game.inc не в COPY прошел и ревью по стенд-маунтам, и зеленый CI)"
+    }
+   ]
+  },
+  {
+   "id": "IR-06",
+   "title": "докачиваются контент-ассеты — URL+sha256 в теле PR",
+   "when": [
+    {
+     "path": "^services/[^/]+/Dockerfile"
+    },
+    {
+     "path": "^deploy/.*/Dockerfile"
+    }
+   ],
+   "content_when": [
+    {
+     "path": "Dockerfile",
+     "regex": "johnvansickle|BtbN|ffmpeg|curl\\s+[^|]*-o|wget\\s+|ADD\\s+https?://|https?://\\S+\\.(?:tar\\.gz|tgz|zip|xz|bz2|deb|rpm|whl)"
+    }
+   ],
+   "require": [
+    {
+     "pr_body": "sha256|[a-f0-9]{64}",
+     "label": "строка «URL sha256» на каждый докачиваемый ассет",
+     "hint": "зафиксируй в теле PR URL+sha256 каждого докачиваемого бинарника/тарбола (Н25; урок ffmpeg: primary сменил тарбол без смены URL — 3 красных CI-прогона, pre-flight чека не было)"
+    }
+   ]
+  }
+ ]
 }

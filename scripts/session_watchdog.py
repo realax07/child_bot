@@ -228,7 +228,6 @@ def main() -> int:
     if actions:
         print("\n".join(actions))
         return 1 if not DRY_RUN else 0
-    print("ok: роутинг чист, зомби-holds нет")
     return 0
 
 

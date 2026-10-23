@@ -26,6 +26,25 @@ TC_REF = re.compile(r"TC-[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*-\d{3}")
 BUG_ID_PATTERN = r"^BUG-(?:[A-Z0-9]+-)*\d{3}(?:-[a-z0-9][a-z0-9.-]*)?$"
 BUG_NAME_RE = re.compile(BUG_ID_PATTERN)
 
+
+def bug_report_paths(repo, bug_id: str) -> list:
+    """Единый контракт БАГ-артефакта Флоу 2 (аудит Н5).
+
+    Легальные имена репорта: test-model/bugs/BUG-<id>.md ИЛИ
+    BUG-<id>-<slug>.md. Прежде ворота расходились: flow_transition требовал
+    ТОЛЬКО точное имя, pr_validate — ТОЛЬКО glob с суффиксом, поэтому файл,
+    прошедший переход Флоу 2, гарантированно валил pr_validate (и наоборот).
+    Оба вызывают этот хелпер: возвращает существующие файлы-кандидаты,
+    точное имя приоритетно; bug_id принимается в формах «BUG-NNN» и «NNN».
+    """
+    digits = re.sub(r"^BUG-", "", str(bug_id or "").strip(), flags=re.I)
+    bugs_dir = Path(repo) / "test-model" / "bugs" if repo is not None else None
+    if not digits or bugs_dir is None or not bugs_dir.is_dir():
+        return []
+    candidates = [bugs_dir / f"BUG-{digits}.md"]
+    candidates.extend(sorted(bugs_dir.glob(f"BUG-{digits}-*.md")))
+    return [p for p in candidates if p.is_file()]
+
 # --- J10: обязательный code-review закрытых dev-задач ---
 # Формат review-файла: agents/code_reviewer_agent.md —
 #   код-reviews/<change-id>/review-<задача>-<NNN>.md, строка «## Вердикт: approve|return».
@@ -33,7 +52,12 @@ BUG_NAME_RE = re.compile(BUG_ID_PATTERN)
 REVIEW_FILE_RE = re.compile(r"^review-(\d{3})-(.+?)-(\d{3})\.md$", re.I)  # rev-first: NNN-task без цифр на конце — неоднозначно; ниже общий
 REVIEW_FILE_REV_FIRST = re.compile(r"^review-(\d{3})-(.+)\.md$", re.I)
 REVIEW_FILE_TASK_FIRST = re.compile(r"^review-(.+?)-(\d{3})\.md$", re.I)
-VERDICT_LINE_RE = re.compile(r"^#{1,4}\s*Вердикт\s*:?\s*(.+)$", re.I | re.M)
+# Н11 (аудит 2026-10-23): заголовок вердикта может быть нумерованным
+# («## 7. Вердикт: approve», «### 3.2 Вердикт return») — необязательный
+# номер раздела перед словом «Вердикт» не должен рвать парсер (ложный
+# None → ложный FAIL J10 на валидном review-файле).
+VERDICT_LINE_RE = re.compile(
+    r"^#{1,4}\s*(?:\d+(?:\.\d+)*[.)]?\s+)?Вердикт\s*:?\s*(.+)$", re.I | re.M)
 VERDICT_APPROVE_RE = re.compile(r"\b(approve|approved|одобрен\w*|одобрить)\b", re.I)
 # SELF_REVIEW-защита (решение Заказчика 2026-10-03): review-файл обязан нести
 # Reviewer-Delegation: deleg_<id> — платформенный id делегации ревьюера
@@ -106,13 +130,21 @@ def closed_dev_tasks(tasks_text: str) -> list[str]:
     2026-10-05-design-task-flow1) тоже исключены: артефакт — мокап в design/,
     приемка — утверждение Заказчиком (не review-файл); дизайн-фаза опциональна
     — в пакетах без UI-дельты задачи [design] может не быть вовсе.
+
+    Н11 (аудит 2026-10-23): между номером и маркером роли допустимы
+    промежуточные метки («[x] 5.3 [M] [ops]» — класс размера [S]/[M]/[P]
+    и т.п.). Прежний regex с единственной опциональной скобкой не видел
+    маркер роли за меткой размера: ops-задача «[x] 5.3 [M] [ops]» считалась
+    dev — ложное требование code-review. Теперь роль ищется среди ВСЕХ
+    скобочных меток строки после номера, порядок и количество не важны.
     """
     out = []
-    for m in re.finditer(r"^[-*]\s*\[x\]\s*(\d+(?:\.\d+)*)(?:\s+\[[SP]\])?(\s+\[([a-z]+)\])?", tasks_text, re.M):
+    for m in re.finditer(r"^[-*]\s*\[x\]\s*(\d+(?:\.\d+)*)[^\n]*$", tasks_text, re.M):
         num = m.group(1)
         if num.split(".")[0] == QA_SECTION:
             continue
-        if m.group(3) in ("ops", "docs", "design"):
+        tags = set(re.findall(r"\[([A-Za-z]+)\]", m.group(0)))
+        if tags & {"ops", "docs", "design"}:
             continue
         out.append(num)
     return out

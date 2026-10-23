@@ -495,6 +495,24 @@ def _arch_review_gate(snapshot: dict, action: "ActionRequest", ctx: dict) -> lis
         f"этап architecture_review — роль architect)")]
 
 
+def _sdd_skip_actor(snapshot: dict, ctx: dict) -> str | None:
+    """Кто явно решил пропускать SDD (P17): факт sdd.approved_skip.
+
+    Действителен только fact status=ready и value={approved_by: <кто>}.
+    Отсутствие факта, битый/безавторный skip — None (гейт не пройден),
+    молчаливого skip нет.
+    """
+    f = _fact(snapshot, "sdd.approved_skip", ctx)
+    if not isinstance(f, dict) or f.get("status") != "ready":
+        return None
+    value = f.get("value")
+    if isinstance(value, dict):
+        who = str(value.get("approved_by") or "").strip()
+        if who:
+            return who
+    return None
+
+
 def _arch_review_done(snapshot: dict, ctx: dict) -> list:
     """Этап architecture review: change-пакет + sdd.md + дельты (контракт 2)."""
     out: list = []
@@ -524,11 +542,33 @@ def _arch_review_done(snapshot: dict, ctx: dict) -> list:
         out.append(Finding(INVALID_GATE,
                            "нет дельт specs/*/spec.md в change-пакете (контракт 2)"))
     sdd_value, sdd_status, out2 = _fact_ready(snapshot, "sdd.present", ctx)
-    out.extend(out2)
-    if sdd_status == "ready" and sdd_value is not True:
-        out.append(Finding(INVALID_GATE,
-                           "sdd.md отсутствует — активный change требует SDD "
-                           "(контракт 2; evidence: sdd.md)"))
+    # P17 (реш. 2026-10-08-arch-review-policy): sdd.md на пакете с обязательным
+    # arch-этапом — не опция. Раньше ветка срабатывала только при status=ready,
+    # и MISSING-факт (sdd.md нет в репо) уходил в generic MISSING_INPUT без
+    # именованной ворота-причины. Теперь отсутствие sdd.md — явный INVALID_GATE;
+    # единственный законный проход без sdd.md — явное skip-решение (факт
+    # sdd.approved_skip из sdd-skip.md с approved_by), которое НЕ молчаливо:
+    # в гейт-выводе обязательная строка «arch: sdd skipped by <кто>».
+    skip_actor = _sdd_skip_actor(snapshot, ctx) if sdd_status == "missing" else None
+    if skip_actor:
+        # Skip покрывает только «sdd.md отсутствует» (MISSING): гасим факт-находку
+        # и штраф complete-set по sdd. UNKNOWN/invalid sdd.md skip не покрывает.
+        out2 = []
+    else:
+        out.extend(out2)
+    sdd_missing = sdd_status != "ready" or sdd_value is not True
+    if sdd_missing:
+        if skip_actor:
+            ctx.setdefault("extra_gates", []).append(
+                f"arch: sdd skipped by {skip_actor} "
+                f"(sdd-skip.md; реш. 2026-10-08-arch-review-policy)")
+        else:
+            out.append(Finding(
+                INVALID_GATE,
+                "sdd.md отсутствует — активный change требует SDD "
+                "(контракт 2; evidence: sdd.md). Проход без SDD — только "
+                "явным skip-решением: sdd-skip.md со строкой "
+                "«approved_by: <кто>» (реш. 2026-10-08-arch-review-policy)"))
     if out0 or out2 or (d_status != "ready"):
         out.append(Finding(
             INVALID_GATE,
@@ -1562,21 +1602,24 @@ def check_bug_fix(snapshot, action, ctx, flow):
     if status == "ready" and isinstance(value, dict) and not value.get("bugs"):
         out.append(Finding(
             MISSING_INPUT,
-            f"баг-репорт test-model/bugs/{bug_id}.md "
+            f"баг-репорт test-model/bugs/{bug_id}.md (или {bug_id}-*.md) "
             f"отсутствует — Флоу 2 требует BUG-NNN репорт (ТЗ 03 п.3)"))
     elif (status == "ready" and repo and bug_id and not any(
             p.get("code") == "FLOW_ID_INVALID"
             for p in snapshot.get("problems", []))
-            and not (Path(repo) / "test-model" / "bugs" /
-                     f"{bug_id}.md").is_file()):
+            and not flow_check.bug_report_paths(Path(repo), bug_id)):
         # J43.1: легальный общий план test-model/bugs/PLAN.md делает каталог
         # bugs/ непустым (факт test_model.present грубый: dir non-empty) —
         # требуем репорт ИМЕННО этого BUG-NNN. При невалидном scope-id
         # (FLOW_ID_INVALID) точная проверка не применяется — scope и так
         # дает AMBIGUOUS_STATE/UNKNOWN.
+        # Н5 (аудит 2026-10-23): контракт единый с pr_validate — точное имя
+        # BUG-<id>.md ИЛИ BUG-<id>-<slug>.md (flow_check.bug_report_paths);
+        # прежде здесь принималось только точное имя, а pr_validate — только
+        # glob с суффиксом: файл, прошедший переход Флоу 2, валил PR.
         out.append(Finding(
             MISSING_INPUT,
-            f"баг-репорт test-model/bugs/{bug_id}.md "
+            f"баг-репорт test-model/bugs/{bug_id}.md (или {bug_id}-*.md) "
             f"отсутствует — Флоу 2 требует BUG-NNN репорт (ТЗ 03 п.3; "
             f"план каталога не считается репортом)"))
     specs_value, specs_status, out1 = _fact_ready(snapshot, "specs.present", ctx)

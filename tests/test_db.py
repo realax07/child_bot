@@ -57,7 +57,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> dict:
 
 
 def test_db_created_from_scratch(tmp_path):
-    """init_db создаёт файл БД с нуля и возвращает рабочее соединение."""
+    """TC-DB-001: init_db создаёт файл БД с нуля и возвращает рабочее соединение."""
     db_path = tmp_path / "bot.db"
     assert not db_path.exists()
     conn = init_db(db_path)
@@ -69,7 +69,7 @@ def test_db_created_from_scratch(tmp_path):
 
 
 def test_three_tables_exist(db):
-    """Схема содержит ровно три таблицы пакета 1 (design D3)."""
+    """TC-DB-002: схема содержит ровно три таблицы пакета 1 (design D3)."""
     rows = db.execute(
         "SELECT name FROM sqlite_master "
         "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -78,18 +78,18 @@ def test_three_tables_exist(db):
 
 
 def test_journal_mode_wal(db):
-    """PRAGMA journal_mode = wal (FR-2, design D3)."""
+    """TC-DB-003: PRAGMA journal_mode = wal (FR-2, design D3)."""
     mode = db.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
 
 
 def test_foreign_keys_on(db):
-    """PRAGMA foreign_keys = ON (design D3)."""
+    """TC-DB-004: PRAGMA foreign_keys = ON (design D3)."""
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
 def test_columns_and_types_per_spec(db):
-    """Колонки и типы строго по ТЗ §9.1–9.3 (+ role, design D3)."""
+    """TC-DB-005: колонки и типы строго по ТЗ §9.1–9.3 (+ role, design D3)."""
     for table, expected in EXPECTED_COLUMNS.items():
         actual = _columns(db, table)
         assert set(actual) == set(expected), f"колонки {table}"
@@ -100,7 +100,7 @@ def test_columns_and_types_per_spec(db):
 
 
 def test_role_default_parent(db):
-    """users.role: NOT NULL DEFAULT 'parent' (FR-22, решение 26.10 №5)."""
+    """TC-DB-006: users.role NOT NULL DEFAULT 'parent' (FR-22, решение 26.10 №5)."""
     info = _columns(db, "users")
     assert info["role"] == ("TEXT", 1)
     ddl = db.execute(
@@ -117,7 +117,7 @@ def test_role_default_parent(db):
 
 
 def test_role_not_null_enforced(db):
-    """Явная попытка вставить NULL в role отклоняется."""
+    """TC-DB-007: явная попытка вставить NULL в role отклоняется."""
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(
             "INSERT INTO users (telegram_id, timezone, created_at, role) "
@@ -127,7 +127,7 @@ def test_role_not_null_enforced(db):
 
 
 def test_sleep_type_and_is_merged_nullable(db):
-    """sleep_type/is_merged пишутся как NULL — резерв схемы (design D6)."""
+    """TC-DB-008: sleep_type/is_merged пишутся как NULL — резерв схемы (design D6)."""
     cur = db.execute(
         "INSERT INTO users (telegram_id, created_at) VALUES (?, ?)",
         (1003, "2026-10-26 12:00:00"),
@@ -146,7 +146,7 @@ def test_sleep_type_and_is_merged_nullable(db):
 
 
 def test_index_on_user_timestamp_exists(db):
-    """Индекс sleep_events(user_id, timestamp) создан."""
+    """TC-DB-009: индекс sleep_events(user_id, timestamp) создан."""
     rows = db.execute(
         "SELECT name, sql FROM sqlite_master WHERE type='index' "
         "AND tbl_name='sleep_events'"
@@ -159,7 +159,7 @@ def test_index_on_user_timestamp_exists(db):
 
 
 def test_foreign_key_enforced(db):
-    """Вставка события для несуществующего пользователя отклоняется."""
+    """TC-DB-010: вставка события для несуществующего пользователя отклоняется."""
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(
             "INSERT INTO sleep_events (user_id, event_type, timestamp, "
@@ -169,7 +169,7 @@ def test_foreign_key_enforced(db):
 
 
 def test_wal_persists_across_connections(tmp_path):
-    """WAL — свойство файла БД: виден и в новом соединении."""
+    """TC-DB-011: WAL — свойство файла БД, виден и в новом соединении."""
     db_path = tmp_path / "wal.db"
     conn = init_db(db_path)
     conn.close()

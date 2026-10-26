@@ -40,11 +40,6 @@ KIND_SLEEP = "sleep"
 KIND_WAKE = "wake"
 KIND_UNDO = "undo"
 
-_CALLBACK_BY_KIND = {
-    KIND_SLEEP: CALLBACK_SLEEP,
-    KIND_WAKE: CALLBACK_WAKE,
-    KIND_UNDO: CALLBACK_UNDO,
-}
 _KIND_BY_STATE_BUTTON = {
     BTN_SLEEP: KIND_SLEEP,
     BTN_WAKE: KIND_WAKE,
@@ -78,7 +73,11 @@ def build_menu(state: str) -> list[list[tuple[str, str]]]:
 
 
 def kind_of_button(button_text: str) -> str | None:
-    """Вид событийной кнопки по её тексту; None — кнопка не событийная."""
+    """Вид событийной кнопки по её тексту; None — кнопка не событийная.
+
+    Кнопка «↩️ Отменить последнее» сюда не относится: обработчик 2.4
+    роутит её по callback_data «undo:last» напрямую, не по тексту.
+    """
     return _KIND_BY_STATE_BUTTON.get(button_text)
 
 

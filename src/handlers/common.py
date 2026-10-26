@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 
 from src.db import init_db
 from src.services import state
@@ -93,7 +94,8 @@ async def redraw_menu(update: Update, conn: sqlite3.Connection, user_id: int) ->
         await query.edit_message_reply_markup(
             reply_markup=current_markup(conn, user_id)
         )
-    except Exception:
-        # Разметка уже совпадает с актуальной (PTB поднимает BadRequest) —
-        # перерисовка не требуется; состояние нажатия это не меняет.
+    except BadRequest:
+        # «Message is not modified»: разметка уже совпадает с актуальной —
+        # перерисовка не требуется. Прочие ошибки не глотаются (review-001-2.2
+        # minor 2): сетевые/прочие сбои видны в логе PTB.
         pass

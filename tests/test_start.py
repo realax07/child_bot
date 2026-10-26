@@ -15,11 +15,12 @@ import pytest
 
 from src import texts
 from src.db import init_db
-from src.handlers.start import BTN_SLEEP, map_language_to_tz, start_command
+from src.handlers.start import map_language_to_tz, start_command
 from src.repositories.settings import SettingsRepo
 from src.repositories.sleep_events import SleepEventsRepo
 from src.repositories.users import UsersRepo
 from src.services.settings import DEFAULT_KEYS, SettingsService
+from src.services.state import BTN_SLEEP, BTN_UNDO, BTN_WAKE, CALLBACK_SLEEP
 
 
 # ------------------------------------------------------------ Заглушки PTB
@@ -158,13 +159,18 @@ def test_start_creates_parent_role(db_path, conn):
 
 
 def test_start_replies_text_7_1_and_awake_keyboard(db_path):
-    """TC-START-005: ответ — текст §7.1 дословно (texts.START) и клавиатура
-    состояния «бодрствует» с кнопкой «😴 Заснул» (ТЗ §6; меню уточнит 2.2)."""
+    """TC-START-005: ответ — текст §7.1 дословно (texts.START) и inline-меню
+    состояния «бодрствует»: «😴 Заснул» + «↩️ Отменить последнее», без
+    «☀️ Проснулся» (ТЗ §6; интеграция 2.3 — единый inline-стиль с колбэками,
+    review-001-2.2)."""
     message = _send_start(db_path)
     assert message.text == texts.START
     assert message.reply_markup is not None
-    row = message.reply_markup.keyboard[0]
-    assert len(row) == 1 and row[0].text == BTN_SLEEP
+    rows = message.reply_markup.inline_keyboard
+    texts_ = [btn.text for row in rows for btn in row]
+    datas = [btn.callback_data for row in rows for btn in row]
+    assert BTN_SLEEP in texts_ and BTN_WAKE not in texts_ and BTN_UNDO in texts_
+    assert CALLBACK_SLEEP in datas
 
 
 def test_seed_defaults_keeps_user_edits(conn):

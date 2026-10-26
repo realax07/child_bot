@@ -26,6 +26,11 @@ def build_application() -> Application:
         raise SystemExit("Переменная окружения BOT_TOKEN не задана.")
 
     application = ApplicationBuilder().token(token).build()
+
+    # Задача 2.3: регистрация обработчиков (команда /start, колбэки событий).
+    from src.handlers import register_handlers
+
+    register_handlers(application)
     return application
 
 

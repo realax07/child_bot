@@ -130,11 +130,19 @@ def test_get_state_empty_db_and_event_types(conn):
     assert get_state(conn, user_id) == STATE_AWAKE  # пустая БД
 
     events = SleepEventsRepo(conn)
-    events.insert(user_id, "sleep", "2026-10-25 22:00:00")
-    events.insert(user_id, "wake", "2026-10-26 07:20:00")
+    # created_at фиксирован у всех вставок: тест не зависит от реального
+    # времени (дефолт now() после 14:00 ломает порядок «последнего»).
+    events.insert(
+        user_id, "sleep", "2026-10-25 22:00:00", created_at="2026-10-26 10:00:00"
+    )
+    events.insert(
+        user_id, "wake", "2026-10-26 07:20:00", created_at="2026-10-26 11:00:00"
+    )
     assert get_state(conn, user_id) == STATE_AWAKE
 
-    events.insert(user_id, "sleep", "2026-10-26 13:30:00")
+    events.insert(
+        user_id, "sleep", "2026-10-26 13:30:00", created_at="2026-10-26 13:30:00"
+    )
     assert get_state(conn, user_id) == STATE_ASLEEP
 
     # Событие с ранним timestamp, записанное позже, — всё равно «последнее»

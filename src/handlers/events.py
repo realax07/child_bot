@@ -132,18 +132,25 @@ def _set_pending_kind(context: ContextTypes.DEFAULT_TYPE, kind: str | None) -> N
             data.pop(WAIT_EVENT_TIME_KEY, None)
         else:
             data[PENDING_KIND_KEY] = kind
+            # Повторное нажатие event:* начинает НОВЫЙ диалог (review-001-4.1,
+            # note 1): зависшая фаза ожидания текста снята — иначе текст,
+            # набранный до выбора time:manual, был бы принят незапрошенно.
+            data.pop(WAIT_EVENT_TIME_KEY, None)
 
 
 def _set_wait_event_time(
     context: ContextTypes.DEFAULT_TYPE, active: bool
 ) -> None:
-    """Фаза «ждём текстовый ввод времени» (задача 4.1, design D10)."""
+    """Фаза «ждём текстовый ввод времени» (задача 4.1, design D10).
+
+    Только постановка фазы: все сбросы идут через _set_pending_kind(context,
+    None) (guard/observer/«Сейчас») либо очисткой ключа в backfill.py
+    (успешный разбор ввода — задача 4.2). Мёртвая ветка сброса убрана
+    (review-001-4.1, note 3).
+    """
     data = getattr(context, "user_data", None)
-    if isinstance(data, dict):
-        if active:
-            data[WAIT_EVENT_TIME_KEY] = True
-        else:
-            data.pop(WAIT_EVENT_TIME_KEY, None)
+    if isinstance(data, dict) and active:
+        data[WAIT_EVENT_TIME_KEY] = True
 
 
 # --------------------------------------------------------- Обработчики
@@ -220,7 +227,10 @@ async def time_choose_callback(
 
         # Нет ожидаемой фазы диалога (перезапуск процесса / чужое сообщение):
         # трактуем как устаревшее нажатие (design D5 — безопасный дефолт).
+        # Симметрично соседним guard-веткам снимаем обе фазы (review-001-4.1,
+        # note 2) — зависший WAIT_EVENT_TIME здесь не выживает.
         if kind is None:
+            _set_pending_kind(context, None)
             await query.answer()
             await common.redraw_menu(update, conn, user["id"])
             return

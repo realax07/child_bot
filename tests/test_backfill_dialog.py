@@ -5,8 +5,8 @@
 #   - после «⏪ Ввести время вручную» приходит §7.11 и фаза WAIT_EVENT_TIME
 #     сохранена в context.user_data (вместе с видом события — задача 4.4);
 #   - текст вне диалога не вызывает никакой реакции (не мешает);
-#   - текст в фазе доходит до обработчика: фаза сохранена, ответ пользователю
-#     не отправляется (парсер — задача 4.2, заглушка без вывода);
+#   - текст в фазе доходит до обработчика: нераспознанный ввод → §7.12,
+#     фаза сохранена (с задачи 4.2 парсер подключён — FR-16);
 #   - «🕐 Сейчас» снимает фазу (диалог завершён).
 #
 # Правило rule 6: каждый тест несёт TC-BFD-NNN в первой строке докстринга.
@@ -154,16 +154,20 @@ def test_tc_bfd_002_text_outside_dialog_ignored(db_path, conn):
 
 
 def test_tc_bfd_003_text_in_phase_reaches_handler(db_path, conn):
-    """TC-BFD-003: текст в фазе доходит до обработчика, фаза сохранена."""
+    """TC-BFD-003: текст в фазе доходит до обработчика, фаза сохранена.
+
+    Обновлено в задаче 4.2: заглушка 4.1 («текст получен, ответа нет»)
+    заменена парсером. Нераспознанный текст → §7.12 с повторным запросом,
+    фаза WAIT_EVENT_TIME сохраняется (FR-16).
+    """
     user_data = {
         events.WAIT_EVENT_TIME_KEY: True,
         events.PENDING_KIND_KEY: "sleep",
     }
-    update, context = _send_text(db_path, "вчера 22:30", user_data)
+    update, context = _send_text(db_path, "совсем не время", user_data)
 
-    # Текст дошёл до заглушки: ответ пользователю НЕ отправляется
-    # (парсер — задача 4.2), фаза осталась активной.
-    assert update.effective_message.replies == []
+    # §7.12 с повторным запросом; фаза осталась активной (FR-16).
+    assert update.effective_message.replies == [texts.BACKFILL_BAD_FORMAT]
     assert context.user_data.get(events.WAIT_EVENT_TIME_KEY) is True
     assert context.user_data.get(events.PENDING_KIND_KEY) == "sleep"
 
@@ -181,3 +185,45 @@ def test_tc_bfd_004_time_now_clears_phase(db_path, conn):
 
     assert events.WAIT_EVENT_TIME_KEY not in context.user_data
     assert events.PENDING_KIND_KEY not in context.user_data
+
+
+# ------------------------------------------------ Задача 4.2: парсер в фазе
+
+
+def test_tc_bfd_005_future_time_warns_phase_kept(db_path, conn):
+    """TC-BFD-005 (задача 4.2, FR-20): время в будущем → предупреждение без
+    записи, фаза сохраняется (пользователь вводит время заново)."""
+    user_data = {
+        events.WAIT_EVENT_TIME_KEY: True,
+        events.PENDING_KIND_KEY: "sleep",
+    }
+    update, context = _send_text(db_path, "завтра 10:00", user_data)
+
+    assert len(update.effective_message.replies) == 1
+    assert "не наступило" in update.effective_message.replies[0]
+    # Фаза сохранена — повторный запрос без записи.
+    assert context.user_data.get(events.WAIT_EVENT_TIME_KEY) is True
+
+
+def test_tc_bfd_006_recognized_time_confirms_phase_cleared(db_path, conn):
+    """TC-BFD-006 (задача 4.2, FR-16): распознанное прошедшее время →
+    подтверждение; фаза WAIT_EVENT_TIME снята, событие ещё НЕ создано
+    (запись — задачи 4.4/4.5)."""
+    user_data = {
+        events.WAIT_EVENT_TIME_KEY: True,
+        events.PENDING_KIND_KEY: "sleep",
+    }
+    update, context = _send_text(db_path, "вчера 22:30", user_data)
+
+    # Подтверждение распознанного времени (время локальное, дата+ЧЧ:ММ).
+    assert len(update.effective_message.replies) == 1
+    assert "принято" in update.effective_message.replies[0]
+    # Фаза разбора завершена; вид события сохранён для задач 4.4/4.5.
+    assert events.WAIT_EVENT_TIME_KEY not in context.user_data
+    assert context.user_data.get(events.PENDING_KIND_KEY) == "sleep"
+    # TODO(4.4/4.5): запись события появится только там — сейчас её нет.
+    from src.repositories.sleep_events import SleepEventsRepo
+    from src.services.event import get_user
+
+    user = get_user(conn, 2001)
+    assert SleepEventsRepo(conn).list_by_user(user["id"]) == []

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -280,8 +281,14 @@ def test_latest_wake_line_comes_from_setting(db_path, conn):
     )
 
     answer = update.effective_message.replies[0]
-    assert "Крайнее пробуждение: 16:00" in answer
-    assert "15:30" not in answer
+    lines = answer.splitlines()
+    # Детерминированно (review-001-2.3, major 1): не сравниваем время
+    # первой строки с реальным временем запуска — ассертим структуру §7.5:
+    # строка 1 — «✅ Засыпание записано в ЧЧ:ММ.», строка 2 — дословно
+    # из настройки wake_deadline=16:00 (суть теста — источник строки).
+    assert len(lines) == 2
+    assert re.fullmatch(r"✅ Засыпание записано в \d{2}:\d{2}\.", lines[0])
+    assert lines[1] == "Сон идёт. Крайнее пробуждение: 16:00."
 
 
 def test_observer_press_is_ignored_with_polite_message(db_path, conn):

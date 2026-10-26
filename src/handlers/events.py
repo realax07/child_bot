@@ -237,6 +237,9 @@ async def time_choose_callback(
             return
 
         # Переключение меню по свежему состоянию (FR-6) + ответ §7.5/§7.2.
+        # answerCallbackQuery до redraw/reply (review-001-2.3, note 1):
+        # при падении edit/reply пользователь всё равно не увидит «часики».
+        await query.answer()
         await common.redraw_menu(update, conn, user["id"])
         local_hhmm = _local_hhmm(now_utc, user["timezone"])
         if kind == KIND_SLEEP:
@@ -247,7 +250,6 @@ async def time_choose_callback(
         else:
             # FR-8: только подтверждающая строка, без строки окна (Пакет 2).
             answer = woke_up_text(local_hhmm)
-        await query.answer()
         if update.effective_message is not None:
             await update.effective_message.reply_text(answer)
     finally:

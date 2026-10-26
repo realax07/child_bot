@@ -30,9 +30,11 @@ import sqlite3
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from src import texts
 from src.handlers import common
 from src.repositories.sleep_events import SleepEventsRepo
-from src.services.event import ROLE_OBSERVER, get_user
+from src.services import access
+from src.services.event import get_user
 
 # callback_data кнопки (ТЗ §6, design D2/§10.3 — контракты задач 2.2/2.4).
 CALLBACK_UNDO_LAST = "undo:last"
@@ -41,8 +43,11 @@ CALLBACK_UNDO_LAST = "undo:last"
 UNDO_DONE = "↩️ Последняя отметка отменена."
 NOTHING_TO_UNDO = "Отменять нечего: записей пока нет."
 
-# Сообщение наблюдателю — дословно как в events.py (design D13, FR-22).
-OBSERVER_DENIED = "Отметки сна недоступны в режиме наблюдателя."
+# Сообщение наблюдателю — единый текст texts.OBSERVER_DENIED через
+# services.access.deny_message() (задача 5.1, design D13, FR-22;
+# review-001-2.4, note 1: дубль литерала убран). Имя оставлено как алиас
+# для обратной совместимости импортов (тесты).
+OBSERVER_DENIED = texts.OBSERVER_DENIED
 
 
 async def undo_last_callback(
@@ -65,9 +70,10 @@ async def undo_last_callback(
     try:
         user = get_user(conn, update.effective_user.id)
 
-        # design D13: наблюдателю отметки недоступны — нажатие игнорируется.
-        if user["role"] == ROLE_OBSERVER:
-            await query.answer(text=OBSERVER_DENIED, show_alert=False)
+        # design D13 (задача 5.1, FR-22): наблюдателю отметки недоступны —
+        # нажатие игнорируется (проверка роли — services.access).
+        if access.is_observer(conn, user["id"]):
+            await query.answer(text=access.deny_message(), show_alert=False)
             return
 
         deleted = SleepEventsRepo(conn).delete_last(user["id"])

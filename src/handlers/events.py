@@ -36,7 +36,8 @@ from telegram.ext import ContextTypes
 
 from src import texts
 from src.handlers import common
-from src.services.event import ROLE_OBSERVER, create_event, get_user
+from src.services import access
+from src.services.event import create_event, get_user
 from src.services.settings import SettingsService
 from src.services.state import KIND_SLEEP, KIND_WAKE, is_stale_callback
 
@@ -51,8 +52,11 @@ PENDING_KIND_KEY = "pending_event_kind"
 # ввод времени (§7.11); фаза читается обработчиком текста (backfill.py).
 WAIT_EVENT_TIME_KEY = "wait_event_time"
 
-# Сообщение наблюдателю (design D13): вне texts.py §7 — служебный текст.
-OBSERVER_DENIED = "Отметки сна недоступны в режиме наблюдателя."
+# Сообщение наблюдателю — единый текст texts.OBSERVER_DENIED через
+# services.access.deny_message() (задача 5.1, design D13; review-001-2.4,
+# note 1: дубль литерала убран). Имя оставлено как алиас для обратной
+# совместимости импортов (handlers/backfill.py, тесты).
+OBSERVER_DENIED = texts.OBSERVER_DENIED
 
 # Fallback пояса — как в /start (design D4, аудитория бота).
 _FALLBACK_TZ = "Europe/Moscow"
@@ -174,10 +178,11 @@ async def event_button_callback(
     try:
         user = get_user(conn, update.effective_user.id)
 
-        # design D13: наблюдателю отметки недоступны — нажатие игнорируется.
-        if user["role"] == ROLE_OBSERVER:
+        # design D13 (задача 5.1): наблюдателю отметки недоступны —
+        # нажатие игнорируется (проверка роли — services.access).
+        if access.is_observer(conn, user["id"]):
             _set_pending_kind(context, None)
-            await query.answer(text=OBSERVER_DENIED, show_alert=False)
+            await query.answer(text=access.deny_message(), show_alert=False)
             return
 
         # Guard устаревшей кнопки (design D5): состояние — свежее из БД.
@@ -219,10 +224,11 @@ async def time_choose_callback(
         user = get_user(conn, update.effective_user.id)
         kind = _pending_kind(context)
 
-        # design D13: наблюдателю отметки недоступны и на этом шаге.
-        if user["role"] == ROLE_OBSERVER:
+        # design D13 (задача 5.1): наблюдателю отметки недоступны и на
+        # этом шаге (проверка роли — services.access).
+        if access.is_observer(conn, user["id"]):
             _set_pending_kind(context, None)
-            await query.answer(text=OBSERVER_DENIED, show_alert=False)
+            await query.answer(text=access.deny_message(), show_alert=False)
             return
 
         # Нет ожидаемой фазы диалога (перезапуск процесса / чужое сообщение):

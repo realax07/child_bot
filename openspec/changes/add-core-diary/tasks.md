@@ -9,7 +9,7 @@
 
 ## Волна 1. Каркас и БД
 
-- [ ] 1.1 Каркас слоёв и точка входа `[P]`
+- [x] 1.1 Каркас слоёв и точка входа `[P]`
   - Зона: `src/main.py`, `src/handlers/__init__.py`, `src/services/__init__.py`, `src/repositories/__init__.py`, `src/texts.py`, `requirements.txt`
   - Сделать: async-приложение python-telegram-bot v21 (`Application.builder()`, long polling), токен из env; пустые слои handlers/services/repositories; модуль `src/texts.py` с текстами ТЗ §7.1–7.15 дословно.
   - Трассировка: FR-1; design D1, D2.

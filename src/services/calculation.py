@@ -8,6 +8,7 @@
 Отнесение сна к странице дня: FR-12; design D8; решение ПМ 26.10.
 Интервалы сна из сырых событий: FR-13; design D6; ТЗ §10.5.
 Склейка коротких пробуждений: FR-13, FR-14; design D9; ТЗ §4.3.
+Сводка за день на лету: FR-3, FR-12, FR-19; design D6, D8.
 """
 
 from collections.abc import Iterable
@@ -210,6 +211,10 @@ def build_sleep_intervals(
         end = now_local if now_local is not None else _day_page_end(
             day_page_of(open_start, day_start), day_start
         )
+        # Защитный кламп (CC-2, review-001-3.3): момент расчёта раньше
+        # начала сна не должен давать интервал с отрицательной
+        # длительностью — интервал схлопывается в нулевой.
+        end = max(end, open_start)
         intervals.append(SleepInterval(start_local=open_start, end_local=end))
 
     return intervals
@@ -250,3 +255,89 @@ def merge_intervals(
         else:
             merged.append(interval)
     return merged
+
+
+@dataclass(frozen=True)
+class DailySummary:
+    """Сводка по странице дня (FR-19, design D6/D8).
+
+    Attributes:
+        page_date: календарная дата страницы дня.
+        total_sleep: суммарный сон страницы — durations интервалов,
+            отнесённых к странице по моменту начала (design D8),
+            целиком, без обрезки по границе окна.
+        total_wake: суммарное бодрствование внутри окна страницы
+            (day_start → day_start следующего дня): окно минус
+            фактическое покрытие сном (сквозные интервалы обрезаются
+            по границе окна — бодрствование это фактическое время
+            без сна внутри окна).
+        sleep_intervals: интервалы сна, отнесённые к странице
+            (после склейки), в хронологическом порядке.
+    """
+
+    page_date: date
+    total_sleep: timedelta
+    total_wake: timedelta
+    sleep_intervals: tuple[SleepInterval, ...]
+
+
+def daily_summary(
+    events: Iterable[tuple[str, datetime]],
+    page_date: date,
+    day_start: time = DEFAULT_DAY_START,
+    now_local: datetime | None = None,
+    merge_threshold_min: int = 20,
+) -> DailySummary:
+    """Сводка за день на лету из сырых событий (FR-3, FR-12, FR-19;
+    design D6, D8).
+
+    Чистая функция: читает сырые события, ничего не пишет в БД и не
+    создаёт хранимых агрегатов (FR-3, ТЗ §9.5). Сон после склейки
+    относится к странице дня по моменту НАЧАЛА сна (design D8) и
+    учитывается целиком — ночной сон через полночь целиком в странице
+    дня начала. Бодрствование — фактическое время без сна внутри окна
+    страницы (day_start → day_start следующего дня): короткое
+    пробуждение, склеенное порогом, бодрствование не создаёт (FR-14).
+
+    Args:
+        events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
+            naive datetime в TZ пользователя, любой порядок.
+        page_date: календарная дата страницы дня.
+        day_start: граница страницы дня (настройка, дефолт 06:00).
+        now_local: момент расчёта (закрывает незакрытый sleep);
+            naive datetime в TZ пользователя или None.
+        merge_threshold_min: порог склейки в минутах (из settings
+            пользователя, FR-24).
+
+    Returns:
+        DailySummary для страницы page_date.
+    """
+    window_start = datetime.combine(page_date, day_start)
+    window_end = _day_page_end(page_date, day_start)
+
+    merged = merge_intervals(
+        build_sleep_intervals(events, now_local=now_local, day_start=day_start),
+        merge_threshold_min,
+    )
+
+    attributed = tuple(
+        interval
+        for interval in merged
+        if day_page_of(interval.start_local, day_start) == page_date
+    )
+    total_sleep = sum((interval.duration for interval in attributed), timedelta())
+
+    covered = timedelta()
+    for interval in merged:
+        overlap_start = max(interval.start_local, window_start)
+        overlap_end = min(interval.end_local, window_end)
+        if overlap_end > overlap_start:
+            covered += overlap_end - overlap_start
+    total_wake = (window_end - window_start) - covered
+
+    return DailySummary(
+        page_date=page_date,
+        total_sleep=total_sleep,
+        total_wake=total_wake,
+        sleep_intervals=attributed,
+    )

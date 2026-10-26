@@ -10,12 +10,36 @@
 # design D6: sleep_type и is_merged — nullable-резервы схемы (ТЗ §9.2);
 # при записи события заполняются NULL, разметка/склейка вычисляются на лету.
 #
-# Путь БД берётся из аргумента (env-обёртка появится в задаче 5.3, design D15).
+# Путь БД берётся из env BOT_DB_PATH (задача 5.3, design D15, FR-25):
+# дефолт — локальный файл рядом с ботом. Файл БД и бэкапы живут только на
+# нашем сервере (решение 26.10 №6): никакой внешний тултип/облако не
+# участвует. Схему v1 задача 5.3 не меняет.
+#
+# Согласованность с src/handlers/common.py::db_path — тот же env BOT_DB_PATH
+# и тот же дефолт (common.py не в зоне задачи 5.3; проверка эквивалентности
+# дефолтов — tests/test_privacy.py).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
+
+# Дефолтный путь БД — локальный файл в рабочем каталоге бота.
+# Должен совпадать с дефолтом в src/handlers/common.py::db_path.
+DEFAULT_DB_PATH = "child_bot.db"
+
+# Переменная окружения с путём к БД (design D15).
+DB_PATH_ENV = "BOT_DB_PATH"
+
+
+def db_path_from_env(environ: dict | None = None) -> Path:
+    """Локальный путь к БД: env BOT_DB_PATH, иначе DEFAULT_DB_PATH.
+
+    FR-25/design D15: БД — только локальный файл на нашем сервере.
+    """
+    env = os.environ if environ is None else environ
+    return Path(env.get(DB_PATH_ENV, DEFAULT_DB_PATH))
 
 _SCHEMA_STATEMENTS = (
     # ТЗ §9.1 + users.role (FR-22, design D3)
@@ -72,12 +96,14 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def init_db(db_path: str | Path) -> sqlite3.Connection:
+def init_db(db_path: str | Path | None = None) -> sqlite3.Connection:
     """Создать БД с нуля (или открыть существующую) со схемой v1.
 
-    Возвращает соединение с включёнными PRAGMA (WAL, foreign_keys).
+    db_path не задан (или None) — путь берётся из env BOT_DB_PATH
+    (дефолт DEFAULT_DB_PATH, design D15/FR-25). Возвращает соединение
+    с включёнными PRAGMA (WAL, foreign_keys).
     """
-    path = Path(db_path)
+    path = Path(db_path) if db_path is not None else db_path_from_env()
     if path.parent and not path.parent.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
 

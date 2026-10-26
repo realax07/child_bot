@@ -15,12 +15,12 @@ def register_handlers(application) -> None:
     """Зарегистрировать обработчики задач в Application (вызывает src.main).
 
     Сейчас: команда /start (задача 2.1); колбэки событий и выбора времени
-    §7.10 (задача 2.3, design D2). Дальнейшие задачи добавляют обработчики
-    сюда же.
+    §7.10 (задача 2.3, design D2); отмена последней отметки (задача 2.4,
+    design D12). Дальнейшие задачи добавляют обработчики сюда же.
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler
 
-    from src.handlers import events, start
+    from src.handlers import events, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
     application.add_handler(
@@ -32,4 +32,7 @@ def register_handlers(application) -> None:
         CallbackQueryHandler(
             events.time_choose_callback, pattern=r"^time:(now|manual)$"
         )
+    )
+    application.add_handler(
+        CallbackQueryHandler(undo.undo_last_callback, pattern=r"^undo:last$")
     )

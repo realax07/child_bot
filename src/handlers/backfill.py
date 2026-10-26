@@ -15,15 +15,22 @@
 #   - будущее (FUTURE) → предупреждение без записи, фаза сохраняется
 #     (FR-20, решение №4: спорные времена — предупреждение).
 #
+# Задача 4.3: глубина ввода (FR-17, design D14) — глубина читается из
+# settings (backfill_depth_days, через SettingsService, без кэша) и
+# передаётся парсеру; слишком старое время (TOO_OLD) → §7.15 без записи,
+# фаза снята (диалог завершён).
+#
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
 # Слой handlers (design D1): единственное обращение к сервисам — get_user
-# (пояс пользователя для парсера, design D4); без repositories и SQL.
+# (пояс пользователя для парсера, design D4) и SettingsService (глубина
+# ввода, design D14); без repositories и SQL. Нормализация пояса — в
+# парсере (resolve_tz), собственного fallback здесь больше нет
+# (minors review-001-4.2).
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -31,11 +38,9 @@ from telegram.ext import ContextTypes
 from src import texts
 from src.handlers import common
 from src.handlers.events import WAIT_EVENT_TIME_KEY
-from src.services.backfill_parser import FUTURE, parse_time_input
+from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, resolve_tz
 from src.services.event import get_user
-
-# Fallback пояса — как в events.py (design D4, аудитория бота).
-_FALLBACK_TZ = "Europe/Moscow"
+from src.services.settings import SettingsService
 
 # Предупреждение FR-20 («распознанное время в будущем») — служебный текст
 # вне ТЗ §7 (в texts.py §7.11–7.15 его нет); формулировка повторяет список
@@ -59,14 +64,6 @@ def is_waiting_for_time(context: ContextTypes.DEFAULT_TYPE) -> bool:
     return isinstance(data, dict) and bool(data.get(WAIT_EVENT_TIME_KEY))
 
 
-def _user_tz(tz_name: str | None) -> ZoneInfo:
-    """Пояс пользователя: имя из БД или fallback (design D4)."""
-    try:
-        return ZoneInfo(tz_name) if tz_name else ZoneInfo(_FALLBACK_TZ)
-    except Exception:  # некорректное имя пояса в БД — аудитория бота
-        return ZoneInfo(_FALLBACK_TZ)
-
-
 def _clear_wait_phase(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Снять фазу ожидания времени (диалог разбора завершён)."""
     data = getattr(context, "user_data", None)
@@ -81,8 +78,10 @@ async def backfill_time_message(
 
     Вне диалога (фаза не активна) текст игнорируется молча — bot не
     реагирует на произвольные сообщения пользователей. В фазе ввод
-    разбирается парсером (задача 4.2): прошедшее время → подтверждение
-    (создание события — 4.4/4.5), мусор → §7.12, будущее → предупреждение.
+    разбирается парсером (задачи 4.2–4.3): прошедшее время в пределах
+    глубины ввода → подтверждение (создание события — 4.4/4.5), мусор →
+    §7.12, будущее → предупреждение, старше backfill_depth_days → §7.15
+    (FR-17, фаза снята — диалог завершён).
     """
     if update.message is None or update.effective_user is None:
         return
@@ -93,12 +92,19 @@ async def backfill_time_message(
     conn = common.open_conn(context)
     try:
         user = get_user(conn, update.effective_user.id)
+        # Глубина ввода — из settings при каждом использовании (FR-24,
+        # design D14), без кэша и хардкода дефолта.
+        depth = int(
+            SettingsService(conn).get(user["id"], "backfill_depth_days")
+        )
     finally:
         conn.close()
 
-    zone = _user_tz(user["timezone"])
     parsed = parse_time_input(
-        update.message.text or "", zone, datetime.now(timezone.utc)
+        update.message.text or "",
+        user["timezone"],
+        datetime.now(timezone.utc),
+        max_age_days=depth,
     )
 
     if parsed is None:
@@ -110,12 +116,24 @@ async def backfill_time_message(
         # записи; фаза сохраняется, пользователь вводит время заново.
         await update.message.reply_text(FUTURE_TIME_WARNING)
         return
+    if parsed is TOO_OLD:
+        # FR-17 (design D14): старше backfill_depth_days — §7.15 дословно,
+        # без записи; фаза снята — диалог завершён (решение ПМ, задача 4.3).
+        _clear_wait_phase(context)
+        await update.message.reply_text(texts.BACKFILL_TOO_OLD)
+        return
 
-    # Распознанное прошедшее время (FR-16). TODO(4.4/4.5): детект конфликтов
-    # §7.13 (design D11) и запись события с ответом §7.14 (is_backfilled=1);
-    # здесь пока только подтверждение и завершение фазы разбора. Вид события
-    # (PENDING_KIND_KEY) сохранён в context.user_data для задач 4.4/4.5.
+    # Распознанное прошедшее время в пределах глубины (FR-16, FR-17).
+    # TODO(4.4/4.5): детект конфликтов §7.13 (design D11) и запись события
+    # с ответом §7.14 (is_backfilled=1); здесь пока только подтверждение и
+    # завершение фазы разбора. Вид события (PENDING_KIND_KEY) сохранён в
+    # context.user_data для задач 4.4/4.5.
     _clear_wait_phase(context)
-    assert isinstance(parsed, datetime)  # сузить после проверок None/FUTURE
-    local = parsed.astimezone(zone).strftime("%d.%m %H:%M")
+    if not isinstance(parsed, datetime):
+        # Все исходы сентинелов перечислены выше; страховка от новых
+        # исходов парсера вместо assert (minors review-001-4.2).
+        return
+    local = parsed.astimezone(resolve_tz(user["timezone"])).strftime(
+        "%d.%m %H:%M"
+    )
     await update.message.reply_text(TIME_ACCEPTED.format(local=local))

@@ -1,7 +1,7 @@
 # PLAN: релиз пакета add-core-diary (child_bot)
 
 - **Дата:** 2026-10-26
-- **Флоу:** 1 (полный: requirements → create_change → arch-review → dev → review → merge → QA-кейсы → ревью кейсов → impact → автотесты → archive → release)
+- Флоу: 1 (полный: requirements → create_change → arch-review → dev → review → merge → QA-кейсы → ревью кейсов → impact → автотесты → archive → release)
 - **Автор плана:** ПМ (Мария-сессия)
 - **Решение продакта:** decisions/2026-10-26-approve-requirements-core-diary.md (requirements УТВЕРЖДЕН, 5e7b50a)
 

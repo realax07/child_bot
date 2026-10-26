@@ -16,13 +16,19 @@ def register_handlers(application) -> None:
 
     Сейчас: команда /start (задача 2.1); колбэки событий и выбора времени
     §7.10 (задача 2.3, design D2); отмена последней отметки (задача 2.4,
-    design D12). Дальнейшие задачи добавляют обработчики сюда же.
+    design D12); текстовый ввод задним числом в фазе WAIT_EVENT_TIME
+    (задача 4.1, design D10). Дальнейшие задачи добавляют обработчики сюда же.
     """
-    from telegram.ext import CallbackQueryHandler, CommandHandler
+    from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-    from src.handlers import events, start, undo
+    from src.handlers import backfill, events, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND, backfill.backfill_time_message
+        )
+    )
     application.add_handler(
         CallbackQueryHandler(
             events.event_button_callback, pattern=r"^event:(sleep|wake)$"

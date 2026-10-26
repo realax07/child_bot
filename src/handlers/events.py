@@ -44,9 +44,12 @@ from src.services.state import KIND_SLEEP, KIND_WAKE, is_stale_callback
 CALLBACK_TIME_NOW = "time:now"
 CALLBACK_TIME_MANUAL = "time:manual"
 
-# Фаза диалога в context.user_data (design D10: фазы диалога — не в БД):
+# Фазы диалога в context.user_data (design D10: фазы диалога — не в БД):
 # какая событийная кнопка ожидает выбора времени.
 PENDING_KIND_KEY = "pending_event_kind"
+# Задача 4.1 (FR-15): ветка «⏪ Ввести время вручную» — бот ждёт текстовый
+# ввод времени (§7.11); фаза читается обработчиком текста (backfill.py).
+WAIT_EVENT_TIME_KEY = "wait_event_time"
 
 # Сообщение наблюдателю (design D13): вне texts.py §7 — служебный текст.
 OBSERVER_DENIED = "Отметки сна недоступны в режиме наблюдателя."
@@ -124,8 +127,23 @@ def _set_pending_kind(context: ContextTypes.DEFAULT_TYPE, kind: str | None) -> N
     if isinstance(data, dict):
         if kind is None:
             data.pop(PENDING_KIND_KEY, None)
+            # Сброс любой фазы диалога заднего числа (задача 4.1, design D10):
+            # диалог прерван (guard/observer/«Сейчас») — фазу нужно снять.
+            data.pop(WAIT_EVENT_TIME_KEY, None)
         else:
             data[PENDING_KIND_KEY] = kind
+
+
+def _set_wait_event_time(
+    context: ContextTypes.DEFAULT_TYPE, active: bool
+) -> None:
+    """Фаза «ждём текстовый ввод времени» (задача 4.1, design D10)."""
+    data = getattr(context, "user_data", None)
+    if isinstance(data, dict):
+        if active:
+            data[WAIT_EVENT_TIME_KEY] = True
+        else:
+            data.pop(WAIT_EVENT_TIME_KEY, None)
 
 
 # --------------------------------------------------------- Обработчики
@@ -216,8 +234,11 @@ async def time_choose_callback(
             return
 
         if action == CALLBACK_TIME_MANUAL:
-            # FR-15: запрос времени текстом §7.11; разбор ввода — задача 4.1
-            # (design D10), здесь фаза диалога сохраняется.
+            # FR-15: запрос времени текстом §7.11; фаза WAIT_EVENT_TIME
+            # сохраняется в context.user_data (задача 4.1, design D10) —
+            # текстовый ввод примет обработчик backfill.py. Разбор ввода
+            # (парсер) — задача 4.2.
+            _set_wait_event_time(context, True)
             await query.answer()
             if update.effective_message is not None:
                 await update.effective_message.reply_text(texts.BACKFILL_ASK_TIME)

@@ -16,7 +16,9 @@ allowlist).
        (ручное решение: false positive опаснее false negative)
   3. Стоп-листы: не-openclaw владелец; возраст < min-age (гонка с живой
      сессией); allowlist-файл (по строке на подстроку cmdline).
-  4. Режимы: по умолчанию dry-run (таблица + exit 1 если были кандидаты);
+  4. Режимы: по умолчанию dry-run (таблица кандидатов; при крон-доставке
+     это и есть сигнал-аномалия — exit всегда 0, чтобы крон не помечал
+     джобу как ошибочную; обнаружение кандидатов видно по stdout);
      --kill = SIGTERM, 3s grace, SIGKILL выжившим; --json — машиночитаемо.
 
 Запуск: python3 stand_reaper.py [--kill] [--json] [--min-age SEC] [--allowlist FILE]
@@ -200,6 +202,7 @@ def kill_targets(targets: list[Proc]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Гашение осиротевших тестовых стендов (J29)")
     ap.add_argument("--kill", action="store_true", help="реально гасить (по умолчанию dry-run)")
+    ap.add_argument("--strict-exit", action="store_true", help="exit 1 при кандидатах в dry-run (CI/ручные проверки)")
     ap.add_argument("--json", action="store_true", help="машиночитаемый вывод")
     ap.add_argument("--min-age", type=float, default=DEFAULT_MIN_AGE_SEC)
     ap.add_argument("--allowlist", help="файл: подстрока cmdline, которую не трогать")
@@ -241,7 +244,10 @@ def main() -> int:
         if not reaps and not reports:
             print("  чисто: осиротевших стендов нет")
 
-    return 1 if reaps and not args.kill else 0
+    # АУД-реаудит 2026-10-23: dry-run с кандидатами — не ошибка, а штатный
+    # сигнал (stdout доставляется кроном). exit 1 оставлен только для
+    # явного требования через --strict-exit.
+    return 1 if (reaps and not args.kill and args.strict_exit) else 0
 
 
 if __name__ == "__main__":

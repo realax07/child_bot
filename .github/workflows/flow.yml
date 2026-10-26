@@ -2,7 +2,7 @@ name: flow
 
 on:
   push:
-    branches: [main]
+    branches: [main, "pipeline/**"]
   pull_request:
 
 jobs:
@@ -27,6 +27,16 @@ jobs:
       # её наличие как «PR-контекст есть» — тогда негативные тесты
       # (SKIPPED без PR-контекста, tests/test_gate_runner.py) получают
       # FAIL вместо SKIPPED. Локально переменной нет — тесты зеленые.
+      # J52-w3 (gate self-test harness): прогон включает tests/
+      # test_gate_harness.py — ворота конвейера обкатываются в CI-имитации
+      # (shallow-клон эталонного репо, env -i: чистый HOME/PATH, без
+      # openspec и GITHUB_*). Отдельный шаг «Gate harness» не нужен: он
+      # гонял бы те же тесты в том же env (env -u GITHUB_EVENT_PATH) —
+      # изоляции/ускорения не добавляет (review-005 minor #2). Покрыты
+      # ancestry-ось класса BUG-022/023/024 (shallow/unshallow) и fresh-ось
+      # (BUG-023/024: датированные эталонные коммиты; тесты
+      # test_meta_commit_after_artifact_passes / _stale), класс J53 —
+      # graceful-деградация без openspec (tests/test_gate_harness.py).
       - name: Run tests
         run: env -u GITHUB_EVENT_PATH python -m pytest tests/ -q
 
@@ -95,8 +105,23 @@ jobs:
             exit 1
           fi
 
-# Примечание (P0.5): job test-flow-control (pytest tests/) НЕ зависит от job flow —
-# pytest независим от flow_check. На момент этого изменения flow_check на main
-# красный из-за 5 самоссылочных ошибок пакета add-deterministic-flow (гигиена P0.6,
-# вне рамок P0.5), поэтому PR могут оставаться красными из-за соседнего job flow —
-# это ожидаемо и не связано с тестами.
+      # J42 (L2): push сабагентской ветки pipeline/** без открытого PR —
+      # падающий шаг (::error::) — детерминированный сигнал ПМ: сабагентская
+      # ветка не прошла ворота — приемка через PR обязательна. Для push в
+      # main и на PR шаг нейтрален (условие if).
+      - name: Push gate — pipeline/** без открытого PR (J42)
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'pipeline/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          OPEN_PRS=$(gh pr list --head "$BRANCH" --state open --json number --jq length)
+          if [ "$OPEN_PRS" = "0" ]; then
+            echo "::error::сабагентская ветка $BRANCH не прошла ворота — открой PR"
+            exit 1
+          fi
+
+# Примечание (P0.5, обновлено волной 4 Н27): job test-flow-control (pytest tests/) НЕ
+# зависит от job flow — pytest независим от flow_check. Историческая краснота flow_check
+# на main (5 самоссылочных ошибок пакета add-deterministic-flow, гигиена P0.6) вычищена:
+# main зелен. Красный job flow на PR — дефект ветки/этапности, не фон.

@@ -14,7 +14,7 @@
   - Сделать: async-приложение python-telegram-bot v21 (`Application.builder()`, long polling), токен из env; пустые слои handlers/services/repositories; модуль `src/texts.py` с текстами ТЗ §7.1–7.15 дословно.
   - Трассировка: FR-1; design D1, D2.
   - Готовность: `python -m src.main` стартует без ошибок; импорт handlers не тянет repositories (проверка `python -c "import src.handlers; assert 'src.repositories' not in __import__('sys').modules"`); grep подтверждает дословные тексты §7.10/§7.12 в `src/texts.py`.
-- [ ] 1.2 Инициализация БД и схема
+- [x] 1.2 Инициализация БД и схема
   - Зона: `src/db.py`, миграция схемы v1
   - Сделать: SQLite с `journal_mode=WAL`, `foreign_keys=ON`; таблицы `users` (+`role TEXT NOT NULL DEFAULT 'parent'`), `sleep_events`, `settings` по ТЗ §9.1–9.3; индекс `sleep_events(user_id, timestamp)`.
   - Трассировка: FR-2, FR-22 (схема); design D3.

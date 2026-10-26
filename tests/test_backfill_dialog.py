@@ -206,24 +206,27 @@ def test_tc_bfd_005_future_time_warns_phase_kept(db_path, conn):
 
 
 def test_tc_bfd_006_recognized_time_confirms_phase_cleared(db_path, conn):
-    """TC-BFD-006 (задача 4.2, FR-16): распознанное прошедшее время →
-    подтверждение; фаза WAIT_EVENT_TIME снята, событие ещё НЕ создано
-    (запись — задачи 4.4/4.5)."""
+    """TC-BFD-006 (задачи 4.2 + 4.5, FR-16): распознанное прошедшее время →
+    событие записано (is_backfilled=1) и ответ §7.14; фаза WAIT_EVENT_TIME
+    снята. (До задачи 4.5 здесь было только подтверждение без записи.)"""
     user_data = {
         events.WAIT_EVENT_TIME_KEY: True,
         events.PENDING_KIND_KEY: "sleep",
     }
     update, context = _send_text(db_path, "вчера 22:30", user_data)
 
-    # Подтверждение распознанного времени (время локальное, дата+ЧЧ:ММ).
+    # Ответ §7.14: событие записано, сводка без окон (задача 4.5).
     assert len(update.effective_message.replies) == 1
-    assert "принято" in update.effective_message.replies[0]
-    # Фаза разбора завершена; вид события сохранён для задач 4.4/4.5.
+    assert "Событие записано" in update.effective_message.replies[0]
+    assert "Окно" not in update.effective_message.replies[0]
+    # Фаза разбора завершена.
     assert events.WAIT_EVENT_TIME_KEY not in context.user_data
-    assert context.user_data.get(events.PENDING_KIND_KEY) == "sleep"
-    # TODO(4.4/4.5): запись события появится только там — сейчас её нет.
+    assert events.PENDING_KIND_KEY not in context.user_data
+    # Событие создано с признаком ввода задним числом (FR-16, задача 4.5).
     from src.repositories.sleep_events import SleepEventsRepo
     from src.services.event import get_user
 
     user = get_user(conn, 2001)
-    assert SleepEventsRepo(conn).list_by_user(user["id"]) == []
+    rows = SleepEventsRepo(conn).list_by_user(user["id"])
+    assert len(rows) == 1
+    assert rows[0]["is_backfilled"] is True

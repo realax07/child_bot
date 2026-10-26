@@ -52,11 +52,14 @@ def create_event(
     user_id: int,
     kind: str,
     when_utc: str,
+    *,
+    is_backfilled: bool = False,
 ) -> dict:
     """Создать событие sleep/wake с сырыми полями (FR-7, FR-8, design D6).
 
     when_utc — момент события строкой UTC «YYYY-MM-DD HH:MM:SS» (design D4).
-    Проверки перед записью (design D5):
+    is_backfilled=True — ввод задним числом (FR-16, задача 4.5); кнопки
+    «сейчас» пишут дефолт False. Проверки перед записью (design D5):
       - kind допустим (sleep/wake);
       - состояние ребёнка соответствует (перечитано из БД);
       - нет незакрытого такого же события (последняя запись не того же вида).
@@ -81,17 +84,29 @@ def create_event(
         raise ValueError(f"незакрытое событие {kind!r} уже существует")
 
     event_id = SleepEventsRepo(conn).insert(
-        user_id, kind, when_utc, is_backfilled=False
+        user_id, kind, when_utc, is_backfilled=is_backfilled
     )
     return {
         "id": event_id,
         "user_id": user_id,
         "event_type": kind,
         "timestamp": when_utc,
-        "is_backfilled": False,
+        "is_backfilled": is_backfilled,
         "sleep_type": None,  # design D6: разметка — расчёт при чтении
         "is_merged": None,   # design D9: склейка — расчёт при чтении
     }
+
+
+def list_raw_events(
+    conn: sqlite3.Connection, user_id: int
+) -> list[dict]:
+    """Сырые события пользователя в хронологическом порядке (design D6).
+
+    Мост для расчётов на лету (задача 4.5, FR-19): handlers обращаются
+    к сервису, не к репозиторию (design D1). Поля — как в БД; timestamp —
+    строка UTC (design D4), перевод в локальное время — у вызывающего.
+    """
+    return SleepEventsRepo(conn).list_by_user(user_id)
 
 
 def overwrite_event(

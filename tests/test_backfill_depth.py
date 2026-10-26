@@ -26,6 +26,7 @@ from src.db import init_db
 from src.handlers import backfill
 from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.repositories.settings import SettingsRepo
+from src.repositories.sleep_events import SleepEventsRepo
 from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input
 from src.services.event import get_user
 from src.services.settings import SettingsService
@@ -186,8 +187,8 @@ def test_tc_bfd_dep_005_handler_too_old_7_15_no_record_phase_cleared(
 
 
 def test_tc_bfd_dep_006_handler_two_days_ago_passes(db_path, conn):
-    """TC-BFD-DEP-006: 2 дня назад в диалоге — проходит (подтверждение,
-    дефолтная глубина 3 из settings)."""
+    """TC-BFD-DEP-006: 2 дня назад в диалоге — проходит (запись с
+    is_backfilled=1 и ответ §7.14, дефолтная глубина 3 из settings)."""
     now_local = datetime.now(TZ)
     target = now_local - timedelta(days=2)
     text = f"{_ddmm(target)} {target:%H:%M}"
@@ -195,8 +196,14 @@ def test_tc_bfd_dep_006_handler_two_days_ago_passes(db_path, conn):
     update, context = _send_text(db_path, text, _phase_data())
 
     assert len(update.effective_message.replies) == 1
-    assert "принято" in update.effective_message.replies[0]
+    assert "Событие записано" in update.effective_message.replies[0]
+    assert "Окно" not in update.effective_message.replies[0]
     assert WAIT_EVENT_TIME_KEY not in context.user_data
+    # Записано задним числом (задача 4.5).
+    user = get_user(conn, 3001)
+    rows = SleepEventsRepo(conn).list_by_user(user["id"])
+    assert len(rows) == 1
+    assert rows[0]["is_backfilled"] is True
 
 
 def test_tc_bfd_dep_007_handler_custom_depth_from_settings(db_path, conn):
@@ -206,13 +213,13 @@ def test_tc_bfd_dep_007_handler_custom_depth_from_settings(db_path, conn):
     user = get_user(conn, 3002)
     now_local = datetime.now(TZ)
 
-    # Кастомная глубина 7: 4 дня назад проходят.
+    # Кастомная глубина 7: 4 дня назад проходят (запись + §7.14, задача 4.5).
     SettingsRepo(conn).upsert(user["id"], "backfill_depth_days", "7")
     target = now_local - timedelta(days=4)
     update, _ = _send_text(
         db_path, f"{_ddmm(target)} {target:%H:%M}", _phase_data(), 3002
     )
-    assert "принято" in update.effective_message.replies[0]
+    assert "Событие записано" in update.effective_message.replies[0]
 
     # Кастомная глубина 1: 2 дня назад → §7.15, фаза снята.
     SettingsRepo(conn).upsert(user["id"], "backfill_depth_days", "1")

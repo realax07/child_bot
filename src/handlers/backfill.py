@@ -10,8 +10,7 @@
 # Задача 4.2: разбор ввода парсером services/backfill_parser.parse_time_input
 # (FR-16, FR-20; design D10):
 #   - распознано (прошедшее время) → конфликт §7.13 (задача 4.4, design
-#     D11) либо подтверждение; СОЗДАНИЕ СОБЫТИЯ при успехе и ответ §7.14 —
-#     задача 4.5 (TODO), фаза снята;
+#     D11) либо запись события + ответ §7.14 (задача 4.5), фаза снята;
 #   - мусор (None) → §7.12 с повторным запросом, фаза сохраняется (FR-16);
 #   - будущее (FUTURE) → предупреждение без записи, фаза сохраняется
 #     (FR-20, решение №4: спорные времена — предупреждение).
@@ -27,6 +26,13 @@
 # фазы диалога сняты, включая PENDING_KIND_KEY после TOO_OLD
 # (notes review-001-4.3).
 #
+# Задача 4.5 (FR-19, design D6/D10; ТЗ §7.14; решение ОВ-ПО-2): успешный
+# ввод задним числом — и прямой записью (create_event, is_backfilled=1),
+# и через «Изменить» в конфликте — отвечает §7.14: подтверждающая строка
+# + обновлённая сводка за день (суммарные сон/бодрствование через
+# calculation.daily_summary по СТРАНИЦЕ ДНЯ вводимого времени); строки
+# окон НЕ выводятся (окна — Пакет 2).
+#
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
 # Слой handlers (design D1): единственное обращение к сервисам — get_user
@@ -37,7 +43,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, time, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -50,29 +57,21 @@ from src.handlers.events import (
     WAIT_EVENT_TIME_KEY,
 )
 from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, resolve_tz
+from src.services.calculation import (
+    DEFAULT_DAY_START,
+    daily_summary,
+    day_page_of,
+)
 from src.services.event import (
     ROLE_OBSERVER,
+    create_event,
     detect_conflict,
     get_user,
+    list_raw_events,
     overwrite_event,
 )
 from src.services.settings import SettingsService
 from src.services.state import KIND_SLEEP, KIND_WAKE
-
-# Предупреждение FR-20 («распознанное время в будущем») — служебный текст
-# вне ТЗ §7 (в texts.py §7.11–7.15 его нет); формулировка повторяет список
-# форматов §7.11 — «предупреждение §7.11-стиля».
-FUTURE_TIME_WARNING = (
-    "⚠️ Это время ещё не наступило. Введите прошедшее время:\n"
-    "\n"
-    "- `10:50` — сегодня\n"
-    "- `вчера 22:30` — вчера\n"
-    "- `08.10 7:15` — конкретная дата"
-)
-
-# Временное подтверждение задачи 4.2: время распознано и принято, конфликта
-# нет. Запись события и успех §7.14 — задача 4.5 (TODO ниже).
-TIME_ACCEPTED = "✅ Время принято: {local}."
 
 # callback_data кнопок §7.13 (ТЗ §10.3; задача 4.4, design D11).
 CALLBACK_CONFLICT_OVERWRITE = "conflict:overwrite"
@@ -107,7 +106,8 @@ def _pending_kind(context: ContextTypes.DEFAULT_TYPE) -> str | None:
 
 
 def _clear_conflict_phases(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Снять ВСЕ фазы диалога: конфликт разрешён (задача 4.4)."""
+    """Снять ВСЕ фазы диалога: разбор завершён (конфликт разрешён — 4.4,
+    либо событие записано — 4.5)."""
     data = getattr(context, "user_data", None)
     if isinstance(data, dict):
         data.pop(CONFIRM_OVERWRITE_KEY, None)
@@ -148,6 +148,59 @@ def _local_hhmm(utc_moment: str | datetime, tz_name: str | None) -> str:
     return utc_moment.astimezone(resolve_tz(tz_name or "")).strftime("%H:%M")
 
 
+def _settings_day_start(raw: str) -> time:
+    """«ЧЧ:ММ» настройки day_start → time; фолбэк — дефолт расчётов (D8)."""
+    try:
+        hh, mm = raw.split(":")
+        return time(int(hh), int(mm))
+    except (AttributeError, ValueError):
+        return DEFAULT_DAY_START
+
+
+def _naive_local(utc_str: str, tz_name: str | None) -> datetime:
+    """Строка UTC БД «YYYY-MM-DD HH:MM:SS» → naive datetime в поясе (D4)."""
+    moment = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc
+    )
+    return moment.astimezone(resolve_tz(tz_name or "")).replace(tzinfo=None)
+
+
+def _backfill_success_text(
+    conn: sqlite3.Connection, user: dict, when_utc: str
+) -> str:
+    """Ответ §7.14 (FR-19, задача 4.5): подтверждение + сводка за день.
+
+    Сводка — calculation.daily_summary по СТРАНИЦЕ ДНЯ вводимого времени
+    (design D6/D8), не по сегодняшней: суммарные сон/бодрствование,
+    строки окон не выводятся (Пакет 2, решение ОВ-ПО-2). Настройки
+    day_start / merge_threshold — из settings при каждом расчёте
+    (FR-24, design D14); сырые события — через сервис (design D1).
+    """
+    settings = SettingsService(conn)
+    user_id = user["id"]
+    tz_name = user["timezone"]
+    day_start = _settings_day_start(str(settings.get(user_id, "day_start")))
+    threshold = int(settings.get(user_id, "merge_threshold"))
+
+    events = [
+        (row["event_type"], _naive_local(row["timestamp"], tz_name))
+        for row in list_raw_events(conn, user_id)
+    ]
+    when_local = _naive_local(when_utc, tz_name)
+    page = day_page_of(when_local, day_start)
+    now_local = datetime.now(resolve_tz(tz_name or "")).replace(tzinfo=None)
+    summary = daily_summary(
+        events,
+        page,
+        day_start=day_start,
+        now_local=now_local,
+        merge_threshold_min=threshold,
+    )
+    return texts.backfill_success_text(
+        _local_hhmm(when_utc, tz_name), summary.total_sleep, summary.total_wake
+    )
+
+
 async def backfill_time_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -156,7 +209,8 @@ async def backfill_time_message(
     Вне диалога (фаза не активна) текст игнорируется молча — bot не
     реагирует на произвольные сообщения пользователей. В фазе ввод
     разбирается парсером (задачи 4.2–4.3): прошедшее время в пределах
-    глубины ввода → подтверждение (создание события — 4.4/4.5), мусор →
+    глубины ввода → запись события (is_backfilled=1) и ответ §7.14 со
+    сводкой за день (задача 4.5) либо §7.13 при конфликте (4.4), мусор →
     §7.12, будущее → предупреждение, старше backfill_depth_days → §7.15
     (FR-17, фаза снята — диалог завершён).
     """
@@ -191,7 +245,7 @@ async def backfill_time_message(
     if parsed is FUTURE:
         # FR-20 (решение №4): время ещё не наступило — предупреждение без
         # записи; фаза сохраняется, пользователь вводит время заново.
-        await update.message.reply_text(FUTURE_TIME_WARNING)
+        await update.message.reply_text(texts.FUTURE_TIME_WARNING)
         return
     if parsed is TOO_OLD:
         # FR-17 (design D14): старше backfill_depth_days — §7.15 дословно,
@@ -243,14 +297,29 @@ async def backfill_time_message(
             )
             return
 
-    # Конфликта нет (или фаза вида потеряна — перезапуск процесса): пока
-    # только подтверждение и завершение фазы разбора. Запись события с
-    # ответом §7.14 (is_backfilled=1) — задача 4.5 (TODO).
-    _clear_wait_phase(context)
-    local = parsed.astimezone(resolve_tz(user["timezone"])).strftime(
-        "%d.%m %H:%M"
-    )
-    await update.message.reply_text(TIME_ACCEPTED.format(local=local))
+    # Конфликта нет: запись события задним числом и ответ §7.14
+    # (задача 4.5, FR-16 + FR-19).
+    if kind is None:
+        # Фаза вида потеряна (перезапуск процесса) — записывать нечем:
+        # безопасный дефолт без записи, фазы сняты (design D10).
+        _clear_conflict_phases(context)
+        return
+
+    conn = common.open_conn(context)
+    try:
+        # FR-16: событие создаётся с признаком is_backfilled (задача 4.5).
+        create_event(conn, user["id"], kind, when_utc, is_backfilled=True)
+        answer = _backfill_success_text(conn, user, when_utc)
+    except ValueError:
+        # Состояние изменилось между детектом конфликта и записью
+        # (design D5): событие НЕ создано, фазы сняты — без ответа «успех».
+        _clear_conflict_phases(context)
+        return
+    finally:
+        conn.close()
+    # Успех — диалог завершён целиком: сняты ВСЕ фазы (включая вид).
+    _clear_conflict_phases(context)
+    await update.message.reply_text(answer)
 
 
 async def conflict_callback(
@@ -321,6 +390,11 @@ async def conflict_callback(
                     label=texts.KIND_LABELS[kind],
                     local=_local_hhmm(pending["when_utc"], user["timezone"]),
                 )
+            )
+            # Задача 4.5 (FR-19, ОВ-ПО-2): «Изменить» — тоже успешный
+            # ввод задним числом → §7.14 со сводкой за день (без окон).
+            await update.effective_message.reply_text(
+                _backfill_success_text(conn, user, pending["when_utc"])
             )
         else:
             # Целевой записи уже нет (удалена параллельно) — данных не

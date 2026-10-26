@@ -217,13 +217,19 @@ def test_tc_cfl_002_overwrite_single_event_new_kind_and_time(db_path, conn):
         db_path, CALLBACK_CONFLICT_OVERWRITE, user_data, telegram_id=4002
     )
 
-    # Уведомление о перезаписи (ОВ-ПО-1).
-    assert update.effective_message.replies == [
-        texts.BACKFILL_OVERWRITTEN.format(
-            label=texts.KIND_LABELS["sleep"],
-            local=new_sleep.astimezone(resolve_tz(TZ)).strftime("%H:%M"),
-        )
-    ]
+    # Уведомление о перезаписи (ОВ-ПО-1), затем §7.14 со сводкой
+    # (задача 4.5: «Изменить» — тоже успешный ввод задним числом).
+    assert update.effective_message.replies[0] == texts.BACKFILL_OVERWRITTEN.format(
+        label=texts.KIND_LABELS["sleep"],
+        local=new_sleep.astimezone(resolve_tz(TZ)).strftime("%H:%M"),
+    )
+    summary_7_14 = update.effective_message.replies[1]
+    assert (
+        f"✅ Событие записано на "
+        f"{new_sleep.astimezone(resolve_tz(TZ)).strftime('%H:%M')}."
+    ) in summary_7_14
+    assert "Обновлённая сводка за день:" in summary_7_14
+    assert "Окно" not in summary_7_14
     # РОВНО одно событие, с типом и временем НОВОГО ввода (без дублей).
     after = _events(conn, user["id"])
     assert len(after) == 1
@@ -383,16 +389,21 @@ def test_tc_cfl_006_observer_overwrite_denied(db_path, conn):
         assert key not in context.user_data
 
 
-def test_tc_cfl_007_no_conflict_confirms_without_event(db_path, conn):
-    """TC-CFL-007 (FR-18, негативный): без конфликта §7.13 не показывается;
-    до задачи 4.5 — подтверждение 4.2, записи ещё нет (is_backfilled
-    появится там)."""
+def test_tc_cfl_007_no_conflict_records_event_with_7_14(db_path, conn):
+    """TC-CFL-007 (FR-18, FR-19): без конфликта §7.13 не показывается;
+    с задачи 4.5 ввод записывается (is_backfilled=1) с ответом §7.14."""
     user = get_user(conn, 4007)
     moment = _past_local(2)  # событий нет — конфликта нет
 
-    update, context = _send_text(db_path, _input_text(moment), _phase("sleep"))
+    update, context = _send_text(
+        db_path, _input_text(moment), _phase("sleep"), telegram_id=4007
+    )
 
     assert len(update.effective_message.replies) == 1
-    assert "принято" in update.effective_message.replies[0]
+    assert "Событие записано" in update.effective_message.replies[0]
+    assert "Окно" not in update.effective_message.replies[0]
     assert backfill.CONFIRM_OVERWRITE_KEY not in context.user_data
-    assert _events(conn, user["id"]) == []
+    # Задача 4.5: событие создано с признаком ввода задним числом.
+    events_after = _events(conn, user["id"])
+    assert len(events_after) == 1
+    assert events_after[0]["is_backfilled"] is True

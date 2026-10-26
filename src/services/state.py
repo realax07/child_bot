@@ -1,0 +1,103 @@
+# Состояние ребёнка и динамическое меню (change-пакет add-core-diary, задача 2.2).
+#
+# design D5: состояние ребёнка НЕ хранится отдельно — выводится из последнего
+# события: нет событий или последнее wake → «бодрствует» (awake), последнее
+# sleep → «спит» (asleep). Таблица состояний отклонена (рассинхронизация
+# с событиями). Состояние перечитывается из БД при каждом вызове (никакого
+# кэша между нажатиями) — основа guard'а устаревших клавиатур (FR-6):
+# inline-клавиатуры из истории чата остаются нажимаемыми, поэтому обработчик
+# колбэка перед созданием события перепроверяет состояние по БД.
+#
+# design D12: «последнее» событие — по created_at, затем id (задним числом
+# введённое событие с ранним timestamp всё равно последнее по факту записи).
+#
+# Чистые функции без Telegram-объектов: клавиатура — данные (текст кнопки +
+# callback_data), разметку PTB строит слой handlers (src/handlers/common.py).
+# Вызывается только слоем handlers (design D1, FR-1).
+
+from __future__ import annotations
+
+import sqlite3
+
+from src.repositories.sleep_events import SleepEventsRepo
+
+# Состояния (design D5)
+STATE_AWAKE = "awake"
+STATE_ASLEEP = "asleep"
+
+# Тексты кнопок меню (ТЗ §6): ровно одна событийная + «Отменить последнее».
+BTN_SLEEP = "😴 Заснул"
+BTN_WAKE = "☀️ Проснулся"
+BTN_UNDO = "↩️ Отменить последнее"
+
+# callback_data кнопок (контракты задач 2.3/2.4).
+CALLBACK_SLEEP = "event:sleep"
+CALLBACK_WAKE = "event:wake"
+CALLBACK_UNDO = "undo:last"
+
+# Виды (kind) событийных кнопок для guard'а (is_stale_callback).
+KIND_SLEEP = "sleep"
+KIND_WAKE = "wake"
+KIND_UNDO = "undo"
+
+_CALLBACK_BY_KIND = {
+    KIND_SLEEP: CALLBACK_SLEEP,
+    KIND_WAKE: CALLBACK_WAKE,
+    KIND_UNDO: CALLBACK_UNDO,
+}
+_KIND_BY_STATE_BUTTON = {
+    BTN_SLEEP: KIND_SLEEP,
+    BTN_WAKE: KIND_WAKE,
+}
+
+
+def get_state(conn: sqlite3.Connection, user_id: int) -> str:
+    """Состояние ребёнка из последнего события (design D5, FR-6).
+
+    Нет событий или последнее wake → STATE_AWAKE; последнее sleep →
+    STATE_ASLEEP. Всегда читает БД заново (без кэша) — каждое нажатие
+    кнопки проверяется по актуальным данным.
+    """
+    last = SleepEventsRepo(conn).last(user_id)
+    if last is None or last["event_type"] == "wake":
+        return STATE_AWAKE
+    return STATE_ASLEEP
+
+
+def build_menu(state: str) -> list[list[tuple[str, str]]]:
+    """Клавиатура по состоянию: [(текст, callback_data), ...] по строкам (FR-6).
+
+    Ровно одна событийная кнопка (awake → «😴 Заснул», asleep →
+    «☀️ Проснулся») и «↩️ Отменить последнее» (design D12) отдельной строкой.
+    """
+    if state == STATE_ASLEEP:
+        event_row = [(BTN_WAKE, CALLBACK_WAKE)]
+    else:
+        event_row = [(BTN_SLEEP, CALLBACK_SLEEP)]
+    return [event_row, [(BTN_UNDO, CALLBACK_UNDO)]]
+
+
+def kind_of_button(button_text: str) -> str | None:
+    """Вид событийной кнопки по её тексту; None — кнопка не событийная."""
+    return _KIND_BY_STATE_BUTTON.get(button_text)
+
+
+def is_stale_callback(
+    conn: sqlite3.Connection, user_id: int, button_kind: str
+) -> bool:
+    """Guard устаревших кнопок (design D5, FR-6) — основа задач 2.3/2.4.
+
+    True — кнопка противоречит актуальному состоянию (нажатие из старого
+    сообщения игнорируется): «Заснул» при asleep, «Проснулся» при awake.
+    «Отменить последнее» валидна в обоих состояниях.
+    Состояние перечитывается из БД при каждом вызове.
+    """
+    state = get_state(conn, user_id)
+    if button_kind == KIND_SLEEP:
+        return state != STATE_AWAKE
+    if button_kind == KIND_WAKE:
+        return state != STATE_ASLEEP
+    if button_kind == KIND_UNDO:
+        return False
+    # Неизвестный вид — трактуем как устаревший (безопасный дефолт).
+    return True

@@ -1,0 +1,16 @@
+{
+  "author_delegation": "deleg_6586178c",
+  "change": "add-core-diary",
+  "diff_base": "2c3a89a",
+  "diff_digest": "7538361277c5758eaca34609a29483935bbb5de91563b212cc5685acc93bf05e",
+  "project": "child_bot",
+  "review_path": "/home/openclaw/child_bot/code-reviews/add-core-diary/review-002-1.1.md",
+  "reviewed_commit_sha": "fa81a55421aceab7bccab15ffa238c9e7d051944",
+  "reviewer_delegation": "deleg_c6eb4474",
+  "schema_version": "review-provenance/1",
+  "task_ids": [
+    "1.1"
+  ],
+  "timestamp": "2026-10-26T11:22:05+00:00",
+  "verdict": "approve"
+}

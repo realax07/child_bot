@@ -17,7 +17,8 @@ def register_handlers(application) -> None:
     Сейчас: команда /start (задача 2.1); колбэки событий и выбора времени
     §7.10 (задача 2.3, design D2); отмена последней отметки (задача 2.4,
     design D12); текстовый ввод задним числом в фазе WAIT_EVENT_TIME
-    (задача 4.1, design D10). Дальнейшие задачи добавляют обработчики сюда же.
+    (задача 4.1, design D10); кнопки §7.13 «Изменить»/«Отменить»
+    (задача 4.4, design D11). Дальнейшие задачи добавляют обработчики сюда же.
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
@@ -41,4 +42,10 @@ def register_handlers(application) -> None:
     )
     application.add_handler(
         CallbackQueryHandler(undo.undo_last_callback, pattern=r"^undo:last$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            backfill.conflict_callback,
+            pattern=r"^conflict:(overwrite|cancel)$",
+        )
     )

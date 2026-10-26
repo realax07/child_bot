@@ -1,6 +1,6 @@
 # Requirements: add-core-diary
 
-- status: draft
+- status: approved
 - project: child_bot
 - change: add-core-diary
 - flow: 1

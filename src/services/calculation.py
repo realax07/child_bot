@@ -6,8 +6,11 @@
 
 Трассировка: FR-9, FR-10, FR-11; design D7; ТЗ §4.2.
 Отнесение сна к странице дня: FR-12; design D8; решение ПМ 26.10.
+Интервалы сна из сырых событий: FR-13; design D6; ТЗ §10.5.
+Склейка коротких пробуждений: FR-13, FR-14; design D9; ТЗ §4.3.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -135,3 +138,115 @@ def sleep_page(
     if end_local < start_local:
         end_local = end_local + timedelta(days=1)
     return day_page_of(start_local, day_start)
+
+
+@dataclass(frozen=True)
+class SleepInterval:
+    """Расчётный интервал сна (ТЗ §10.5, design D6/D9).
+
+    Attributes:
+        start_local: начало сна, naive datetime в TZ пользователя.
+        end_local: конец сна, naive datetime в TZ пользователя.
+    """
+
+    start_local: datetime
+    end_local: datetime
+
+    @property
+    def duration(self) -> timedelta:
+        """Длительность интервала сна."""
+        return self.end_local - self.start_local
+
+
+def _day_page_end(day_page: date, day_start: time) -> datetime:
+    """Момент конца страницы дня: day_start следующего календарного дня."""
+    return datetime.combine(day_page + timedelta(days=1), day_start)
+
+
+def build_sleep_intervals(
+    events: Iterable[tuple[str, datetime]],
+    now_local: datetime | None = None,
+    day_start: time = DEFAULT_DAY_START,
+) -> list[SleepInterval]:
+    """Построить интервалы сна из сырой последовательности sleep/wake
+    (design D6, ТЗ §10.5) — база всех расчётов волны 3.
+
+    Правила:
+      - события сортируются по timestamp перед парсингом — сырые записи
+        вне хронологического порядка обрабатываются корректно;
+      - пары sleep→wake образуют интервал сна;
+      - незакрытый sleep → интервал до now_local (момент расчёта), а при
+        отсутствии now_local — до конца страницы дня начала сна
+        (day_start следующего календарного дня);
+      - wake без парного sleep игнорируется;
+      - повторный sleep при открытом интервале игнорируется (интервал
+        открывает первое засыпание).
+
+    Args:
+        events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
+            naive datetime в TZ пользователя, любой порядок.
+        now_local: момент расчёта (закрывает незакрытый sleep);
+            naive datetime в TZ пользователя или None.
+        day_start: граница страницы дня (настройка, дефолт 06:00) —
+            определяет конец страницы при незакрытом sleep без now_local.
+
+    Returns:
+        list[SleepInterval] в хронологическом порядке.
+    """
+    ordered = sorted(events, key=lambda item: item[1])
+
+    intervals: list[SleepInterval] = []
+    open_start: datetime | None = None
+    for event_type, timestamp in ordered:
+        if event_type == "sleep":
+            if open_start is None:
+                open_start = timestamp
+        elif event_type == "wake" and open_start is not None:
+            intervals.append(SleepInterval(start_local=open_start, end_local=timestamp))
+            open_start = None
+        # wake без парного sleep — игнорируется (FR-13, ТЗ §4.1).
+
+    if open_start is not None:
+        end = now_local if now_local is not None else _day_page_end(
+            day_page_of(open_start, day_start), day_start
+        )
+        intervals.append(SleepInterval(start_local=open_start, end_local=end))
+
+    return intervals
+
+
+def merge_intervals(
+    intervals: Iterable[SleepInterval],
+    threshold_min: int,
+) -> list[SleepInterval]:
+    """Склеить смежные интервалы сна при коротком пробуждении
+    (design D9, FR-13, FR-14; ТЗ §4.3).
+
+    Смежные интервалы объединяются, если бодрствование между ними
+    СТРОГО меньше порога (пробуждение ровно threshold_min минут
+    интервалы НЕ склеивает). Порог передаётся параметром — читается
+    из settings пользователя при каждом расчёте (FR-24), смена порога
+    меняет результат без перезаписи событий. is_merged в БД не пишется
+    — склейка только вычисление (D9).
+
+    Args:
+        intervals: интервалы сна (результат build_sleep_intervals).
+        threshold_min: порог склейки в минутах (из settings пользователя).
+
+    Returns:
+        list[SleepInterval] после склейки, в хронологическом порядке.
+    """
+    threshold = timedelta(minutes=threshold_min)
+    ordered = sorted(intervals, key=lambda i: i.start_local)
+
+    merged: list[SleepInterval] = []
+    for interval in ordered:
+        if merged and (interval.start_local - merged[-1].end_local) < threshold:
+            prev = merged[-1]
+            merged[-1] = SleepInterval(
+                start_local=prev.start_local,
+                end_local=max(prev.end_local, interval.end_local),
+            )
+        else:
+            merged.append(interval)
+    return merged

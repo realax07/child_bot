@@ -2,3 +2,23 @@
 # Правило слоёв (design D1, FR-1): handlers обращаются только к services,
 # НЕ импортируют repositories и не обращаются к БД напрямую.
 # Наполнение — задачи волн 2–5 change-пакета add-core-diary.
+#
+# Регистрация — через register_handlers(application) из src.main (задача 2.1).
+# Импорт модулей обработчиков ЛЕНИВЫЙ (внутри функции): критерий готовности
+# 1.1 требует, чтобы `import src.handlers` не тянул src.repositories, а
+# start.py на уровне модуля импортирует repositories через сервис.
+
+from __future__ import annotations
+
+
+def register_handlers(application) -> None:
+    """Зарегистрировать обработчики задач в Application (вызывает src.main).
+
+    Сейчас: команда /start (задача 2.1). Дальнейшие задачи добавляют
+    обработчики сюда же.
+    """
+    from telegram.ext import CommandHandler
+
+    from src.handlers import start
+
+    application.add_handler(CommandHandler("start", start.start_command))

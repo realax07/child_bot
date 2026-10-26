@@ -183,7 +183,15 @@ def test_undo_after_backfill_removes_latest_by_created_at(db_path, conn):
     задним числом введённый sleep (ранний timestamp, поздний created_at)
     удаляется, несмотря на более поздний timestamp «обычной» записи."""
     user_id = _uid(conn)
-    SleepEventsRepo(conn).insert(user_id, "wake", "2026-10-26 12:00:00")
+    # created_at фиксирован у обеих вставок: «последнее» по created_at
+    # не зависит от реальных часов (та же детерминированность, что в
+    # test_state.py). backfilled-sleep задним числом — его created_at
+    # позже созданного «обычно» wake.
+    SleepEventsRepo(
+        conn,
+    ).insert(
+        user_id, "wake", "2026-10-26 12:00:00", created_at="2026-10-26 12:30:00"
+    )
     SleepEventsRepo(
         conn,
     ).insert(

@@ -19,7 +19,7 @@
   - Сделать: SQLite с `journal_mode=WAL`, `foreign_keys=ON`; таблицы `users` (+`role TEXT NOT NULL DEFAULT 'parent'`), `sleep_events`, `settings` по ТЗ §9.1–9.3; индекс `sleep_events(user_id, timestamp)`.
   - Трассировка: FR-2, FR-22 (схема); design D3.
   - Готовность: юнит-тест создаёт БД с нуля, проверяет наличие трёх таблиц, `PRAGMA journal_mode` = `wal`, дефолт `role='parent'`, nullable-колонки `sleep_events.sleep_type`/`is_merged`.
-- [ ] 1.3 Репозитории users / sleep_events / settings `[P]`
+- [x] 1.3 Репозитории users / sleep_events / settings `[P]`
   - Зона: `src/repositories/{users,sleep_events,settings}.py`, `tests/test_repositories.py`
   - Сделать: `UsersRepo` (get_or_create по telegram_id, чтение/обновление timezone), `SleepEventsRepo` (insert, list_by_user, last, delete_last, overwrite), `SettingsRepo` (get_all, get, upsert).
   - Трассировка: FR-2, FR-3; design D3, D5, D12.

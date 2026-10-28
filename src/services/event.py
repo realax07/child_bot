@@ -187,6 +187,14 @@ def detect_conflict(
         (минимум |t − ts|; ничья — более раннее, затем id);
       - при нарушении порядка — ПОСЛЕДНЕЕ (по времени, затем id)
         существующее событие, приводящее к нарушению.
+    Исключение (BUG-001): незакрытый хвостовой sleep (последнее событие —
+    sleep без последующего wake) и ввод wake ПОЗЖЕ его начала — это
+    штатное закрытие пары (как кнопки «сейчас», §4.1), а не конфликт:
+    возвращается None, событие записывается как есть. Все прежние
+    конфликты сохраняются: пересечение с закрытой парой, точное
+    совпадение, нарушение порядка (D11 — для настоящих конфликтов);
+    wake РАНЬШЕ начала незакрытого sleep без пересечений и нарушения
+    порядка записывается как есть (спека D11, TC-BFS-003).
     Пересечение проверяется первым; нарушения порядка — когда пересечения
     нет. None — конфликта нет, ввод можно записывать как есть.
     """
@@ -198,6 +206,14 @@ def detect_conflict(
         return None
     now_utc = datetime.now(timezone.utc)
 
+    # Незакрытый хвостовой sleep (BUG-001): последнее событие — sleep,
+    # парного wake после него в хронологии нет. Ввод wake ПОЗЖЕ его
+    # начала закрывает интервал штатно (§4.1) — такой интервал НЕ
+    # пересечение ниже; РАНЬШЕ — конфликт (проверка после п. 2).
+    open_sleep_start: datetime | None = None
+    if events[-1]["event_type"] == KIND_SLEEP:
+        open_sleep_start = _parse_utc(events[-1]["timestamp"])
+
     # 1) Пересечения интервалов сна (границы включены — сценарий §7.13).
     candidates: list[tuple[dict, float]] = []
     seen_ids: set[int] = set()
@@ -205,6 +221,15 @@ def detect_conflict(
         if ev["event_type"] != KIND_SLEEP:
             continue
         start, end, members = _interval_events(events, i, now_utc)
+        if (
+            kind == KIND_WAKE
+            and open_sleep_start is not None
+            and start == open_sleep_start
+            and t > open_sleep_start
+        ):
+            # BUG-001: wake позже начала незакрытого сна — штатное
+            # закрытие пары, не конфликт (создаётся без §7.13).
+            continue
         if not (start <= t <= end):
             continue
         for member in members:

@@ -50,6 +50,36 @@ NOTHING_TO_UNDO = "Отменять нечего: записей пока нет
 OBSERVER_DENIED = texts.OBSERVER_DENIED
 
 
+async def reply_undo_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn: sqlite3.Connection,
+    user: dict,
+) -> None:
+    """Кнопка «↩️ Отменить последнее» постоянной reply-панели (BUG-002).
+
+    Та же логика, что undo_last_callback (callback undo:last, design
+    D12): удаление последней записи по created_at, затем id; пустая БД —
+    «отменять нечего», данные не меняются. Отличие: нажатие — текстовое
+    сообщение, перерисовывать нечего, поэтому после подтверждения бот
+    присылает свежее inline-меню отдельным сообщением (п. 3 плана
+    BUG-002). Observer — вежливый отказ без удаления (design D13).
+    """
+    message = update.effective_message
+    if message is None:
+        return
+
+    # design D13 (FR-22): наблюдателю отметки недоступны.
+    if access.is_observer(conn, user["id"]):
+        await message.reply_text(access.deny_message())
+        return
+
+    deleted = SleepEventsRepo(conn).delete_last(user["id"])
+    await message.reply_text(UNDO_DONE if deleted else NOTHING_TO_UNDO)
+    # Свежее inline-меню по состоянию после удаления (design D5, FR-6).
+    await common.send_fresh_menu(update, conn, user["id"])
+
+
 async def undo_last_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:

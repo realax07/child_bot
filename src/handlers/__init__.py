@@ -22,13 +22,25 @@ def register_handlers(application) -> None:
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-    from src.handlers import backfill, events, start, undo
+    from src.handlers import backfill, common, events, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND, backfill.backfill_time_message
         )
+    )
+    # Хотфикс BUG-002: кнопки постоянной reply-панели — в ОТДЕЛЬНОЙ группе
+    # (group=1), иначе (в группе 0) этот MessageHandler перехватил бы ВСЕ
+    # текстовые апдейты у себя и диалог ввода времени backfill.py (группа 0)
+    # перестал бы получать текст. В разных группах апдейт получают оба;
+    # reply_button_message реагирует ТОЛЬКО на тексты кнопок панели,
+    # прочий текст — молча.
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND, common.reply_button_message
+        ),
+        group=1,
     )
     application.add_handler(
         CallbackQueryHandler(

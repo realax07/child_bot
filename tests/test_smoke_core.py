@@ -35,7 +35,7 @@ import pytest
 
 from src import texts
 from src.db import init_db
-from src.handlers import backfill, events, start, undo
+from src.handlers import backfill, common, events, start, undo
 from src.handlers.events import CALLBACK_TIME_MANUAL, CALLBACK_TIME_NOW
 from src.repositories.sleep_events import SleepEventsRepo
 from src.services.event import get_user
@@ -218,9 +218,14 @@ class TestSmokeCore:
         «↩️ Отменить последнее»; меню и БД на каждом шаге (PLAN п.3)."""
         user_data: dict = {}  # ОДИН user_data на весь сценарий (реальный PTB)
 
-        # 1. /start → §7.1, меню с «😴 Заснул» (FR-5, FR-6)
+        # 1. /start → §7.1, меню с «😴 Заснул» (FR-5, FR-6).
+        # Хотфикс BUG-002: /start сначала шлёт сообщение-носитель постоянной
+        # reply-панели, затем приветствие с inline-меню (PLAN-BUG-002 п. 3/4).
         start_update, _ = self._start(db_path)
-        assert start_update.effective_message.replies == [texts.START]
+        assert start_update.effective_message.replies == [
+            common.REPLY_PANEL_INTRO,
+            texts.START,
+        ]
         start_menu = start_update.effective_message.reply_markup
         assert BTN_SLEEP in _button_texts(start_menu)
         assert BTN_WAKE not in _button_texts(start_menu)

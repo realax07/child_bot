@@ -1,0 +1,16 @@
+[Unit]
+Description=Sleep Diary Telegram Bot (child_bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openclaw
+WorkingDirectory=/home/openclaw/child_bot
+EnvironmentFile=/home/openclaw/child_bot/.env
+ExecStart=/home/openclaw/venvs/sleepbot/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

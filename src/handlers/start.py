@@ -28,6 +28,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from src import texts
+from src.handlers import common
 from src.handlers.common import current_markup, open_conn
 from src.repositories.users import UsersRepo
 from src.services.settings import SettingsService
@@ -88,6 +89,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         conn.close()
 
     if update.effective_message is not None:
+        # Хотфикс BUG-002: постоянная reply-панель (видна всегда внизу
+        # экрана, не зависит от истории чата). Отдельным сообщением-носителем
+        # ДО приветствия; приветствие (ниже) по-прежнему несёт inline-меню
+        # по состоянию — оба механизма сосуществуют (п. 4 плана BUG-002):
+        # reply-панель — всегда доступная, inline — для подтверждений/
+        # выбора времени.
+        await update.effective_message.reply_text(
+            common.REPLY_PANEL_INTRO, reply_markup=common.build_reply_keyboard()
+        )
         await update.effective_message.reply_text(
             texts.START, reply_markup=markup
         )

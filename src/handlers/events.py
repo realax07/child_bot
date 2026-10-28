@@ -95,8 +95,12 @@ def _kind_from_callback_data(data: str | None) -> str | None:
     return None
 
 
-def _time_choose_markup() -> InlineKeyboardMarkup:
-    """Клавиатура §7.10: «🕐 Сейчас» / «⏪ Ввести время вручную» (FR-15)."""
+def time_choose_markup() -> InlineKeyboardMarkup:
+    """Клавиатура §7.10: «🕐 Сейчас» / «⏪ Ввести время вручную» (FR-15).
+
+    Публичная с версии BUG-002: используется и reply-обработчиком панели
+    (reply_event_button), и inline-колбэком event_button_callback.
+    """
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(texts.BTN_TIME_NOW, callback_data=CALLBACK_TIME_NOW)],
@@ -196,7 +200,7 @@ async def event_button_callback(
         _set_pending_kind(context, kind)
         try:
             await query.edit_message_text(
-                texts.BACKFILL_CHOOSE_TIME, reply_markup=_time_choose_markup()
+                texts.BACKFILL_CHOOSE_TIME, reply_markup=time_choose_markup()
             )
         except BadRequest:
             # §7.10 уже показан (повторное нажатие) — перерисовка не нужна.
@@ -204,6 +208,51 @@ async def event_button_callback(
         await query.answer()
     finally:
         conn.close()
+
+
+# ------------------------------------------------- Reply-панель (BUG-002)
+
+async def reply_event_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn: sqlite3.Connection,
+    user: dict,
+    kind: str,
+) -> None:
+    """Кнопка «😴 Заснул» / «☀️ Проснулся» постоянной reply-панели (BUG-002).
+
+    Отличия от event_button_callback: нажатие — обычное текстовое
+    сообщение (reply-клавиатура присылает текст), перерисовывать нечего.
+    Guard design D5 тот же — состояние перечитывается из БД:
+      - «не та» кнопка → дружелюбный ответ по факту (ALREADY_ASLEEP /
+        STILL_AWAKE) + свежее inline-меню отдельным сообщением; записи НЕТ;
+      - валидная кнопка → штатный диалог §7.10 (BACKFILL_CHOOSE_TIME с
+        кнопками time:now / time:manual), как у inline event:*.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+
+    # design D13: наблюдателю отметки недоступны — вежливый отказ без события.
+    if access.is_observer(conn, user["id"]):
+        _set_pending_kind(context, None)
+        await message.reply_text(access.deny_message())
+        return
+
+    # Guard устаревшей кнопки (design D5): состояние — свежее из БД.
+    if is_stale_callback(conn, user["id"], kind):
+        _set_pending_kind(context, None)
+        await message.reply_text(
+            common.ALREADY_ASLEEP if kind == KIND_SLEEP else common.STILL_AWAKE
+        )
+        await common.send_fresh_menu(update, conn, user["id"])
+        return
+
+    # Валидная кнопка: тот же диалог §7.10, что у inline event:* (FR-15).
+    _set_pending_kind(context, kind)
+    await message.reply_text(
+        texts.BACKFILL_CHOOSE_TIME, reply_markup=time_choose_markup()
+    )
 
 
 async def time_choose_callback(

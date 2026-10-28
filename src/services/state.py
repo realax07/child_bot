@@ -40,6 +40,15 @@ KIND_SLEEP = "sleep"
 KIND_WAKE = "wake"
 KIND_UNDO = "undo"
 
+# Постоянная reply-клавиатура (хотфикс BUG-002, S2): панель внизу экрана
+# видна всегда и не зависит от прокрутки истории чата — root cause BUG-002
+# в том, что inline-меню живёт в конкретном сообщении. Статичный список
+# безопасен: guard D5 (is_stale_callback) перечитывает состояние из БД на
+# каждое нажатие, «не та» кнопка не создаёт запись (см. handlers/common.py).
+# Чистые данные (без PTB-объектов): ReplyKeyboardMarkup строит слой handlers.
+REPLY_KEYBOARD: list[list[str]] = [[BTN_SLEEP, BTN_WAKE, BTN_UNDO]]
+REPLY_BUTTONS: tuple[str, ...] = (BTN_SLEEP, BTN_WAKE, BTN_UNDO)
+
 _KIND_BY_STATE_BUTTON = {
     BTN_SLEEP: KIND_SLEEP,
     BTN_WAKE: KIND_WAKE,

@@ -19,8 +19,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: python -m pip install --upgrade pip pytest
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest -r requirements.txt
 
       # GITHUB_EVENT_PATH удаляется на уровне процесса (env -u): Actions
       # всегда указывает эту переменную, а pr_validate/gate_runner трактуют

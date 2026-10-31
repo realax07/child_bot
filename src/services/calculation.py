@@ -417,6 +417,80 @@ def _page_rise(
     return chosen[-1].end_local
 
 
+def _unclosed_interval(
+    ordered: list[tuple[str, datetime]],
+    merged: list[SleepInterval],
+) -> SleepInterval | None:
+    """Незакрытый sleep: последняя запись — sleep без парного wake.
+
+    Единая точка правила для `day_facts_lines` (PB-3), `nap_window` и
+    `total_wake_at` (design D16; minor-3 review-001-1.1: правило не
+    дублируется по функциям). Это ВСЕГДА последний построенный
+    интервал — его конец НЕ факт (подъёма, пробуждения). Пустой или
+    полностью закрытый день — None.
+    """
+    if ordered and ordered[-1][0] == "sleep" and merged:
+        return merged[-1]
+    return None
+
+
+def _bug004_total_wake(
+    merged: list[SleepInterval],
+    unclosed: SleepInterval | None,
+    rise_end: datetime | None,
+    now_local: datetime | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> timedelta:
+    """«Бодрствование общее» — ЕДИНАЯ формула BUG-004 (ред. 31.10).
+
+    (момент расчёта − Подъем) − покрытие ДНЕВНЫМ сном в [база; конец]:
+    база — факт «Подъем» (`_page_rise`; нет подъёма — day_start
+    страницы); конец — момент расчёта now_local (при now_local=None —
+    конец окна страницы, страница закрыта); идущий незакрытый НОЧНОЙ
+    сон замораживает конец на своём начале (после отбоя ребёнок не
+    бодрствует); незакрытый ДНЕВНОЙ сон вычитается до now_local (сон,
+    не бодрствование; его конец уже now_local — build_sleep_intervals);
+    ночное покрытие не вычитается (в базе от подъёма его нет);
+    отрицательный результат → 0.
+
+    Единственная точка арифметики бодрствования: факт PB-3
+    (`day_facts_lines`) и расчёты подсказок (`total_wake_at`, задача
+    1.2 add-recommendations) считают через НЕЁ — вторая реализация
+    формулы запрещена design D16/BUG-004 (исходный инцидент «суммы не
+    сходятся»).
+    """
+    wake_base = rise_end if rise_end is not None else window_start
+    wake_end = now_local if now_local is not None else window_end
+    if unclosed is not None and classify_sleep(
+        unclosed.start_local, unclosed.end_local
+    ).is_night:
+        wake_end = unclosed.start_local
+    day_covered = timedelta()
+    for interval in merged:
+        if classify_sleep(interval.start_local, interval.end_local).is_night:
+            continue
+        overlap_start = max(interval.start_local, wake_base)
+        overlap_end = min(interval.end_local, wake_end)
+        if overlap_end > overlap_start:
+            day_covered += overlap_end - overlap_start
+    total_wake = (wake_end - wake_base) - day_covered
+    if total_wake < timedelta(0):
+        total_wake = timedelta(0)
+    return total_wake
+
+
+def _bedtime_from(
+    settings: Mapping[str, int | float | str] | None,
+    default: time,
+) -> time:
+    """Вечерняя граница «Отбоя» из night_bounds «ЧЧ:ММ-ЧЧ:ММ» (начало)."""
+    raw_bounds = _setting_value(settings, "night_bounds", default)
+    if isinstance(raw_bounds, str) and "-" in raw_bounds:
+        return _as_hhmm(raw_bounds.split("-")[0])
+    return _as_hhmm(raw_bounds)
+
+
 def day_facts_lines(
     events: Iterable[tuple[str, datetime]],
     page_date: date,
@@ -507,11 +581,8 @@ def day_facts_lines(
     window_start = datetime.combine(page_date, day_start)
     window_end = _day_page_end(page_date, day_start)
 
-    # Незакрытый sleep: последняя запись — sleep без парного wake; это
-    # ВСЕГДА последний построенный интервал (его конец — не факт).
-    unclosed: SleepInterval | None = None
-    if ordered and ordered[-1][0] == "sleep" and merged:
-        unclosed = merged[-1]
+    # Незакрытый sleep — единый хелпер (design D16, minor-3 review-001-1.1).
+    unclosed = _unclosed_interval(ordered, merged)
 
     def closed(interval: SleepInterval) -> bool:
         return interval is not unclosed
@@ -569,30 +640,13 @@ def day_facts_lines(
         total = sum((i.duration for i in closed_night), timedelta())
         lines.append(f"{texts.FACT_NIGHT_SLEEP}: {texts.format_duration(total)}")
 
-    # «Бодрствование общее» (ред. BUG-004, решение продакта 31.10):
-    # (момент расчёта − Подъем) − покрытие ДНЕВНЫМ сном в [база; конец].
-    # База — факт «Подъем» (нет — day_start страницы); конец — момент
-    # расчёта now_local (нет — конец окна страницы); незакрытый ночной
-    # сон (идёт ночь) замораживает конец на своём начале; незакрытый
-    # дневной сон вычитается до now_local (его конец уже now_local —
-    # build_sleep_intervals); ночное покрытие не вычитается; < 0 → 0.
-    wake_base = rise_end if rise_end is not None else window_start
-    wake_end = now_local if now_local is not None else window_end
-    if unclosed is not None and classify_sleep(
-        unclosed.start_local, unclosed.end_local
-    ).is_night:
-        wake_end = unclosed.start_local
-    day_covered = timedelta()
-    for interval in merged:
-        if classify_sleep(interval.start_local, interval.end_local).is_night:
-            continue
-        overlap_start = max(interval.start_local, wake_base)
-        overlap_end = min(interval.end_local, wake_end)
-        if overlap_end > overlap_start:
-            day_covered += overlap_end - overlap_start
-    total_wake = (wake_end - wake_base) - day_covered
-    if total_wake < timedelta(0):
-        total_wake = timedelta(0)
+    # «Бодрствование общее» — единая формула BUG-004 через хелпер
+    # (та же арифметика, что total_wake_at для подсказок; design D16:
+    # без дублей формулы). Правила базы/конца/заморозки/клампа —
+    # в докстринге `_bug004_total_wake`.
+    total_wake = _bug004_total_wake(
+        merged, unclosed, rise_end, now_local, window_start, window_end,
+    )
     lines.append(f"{texts.FACT_TOTAL_WAKE}: {texts.format_duration(total_wake)}")
     return lines
 
@@ -627,6 +681,11 @@ def _setting_value(
 def _as_minutes(value: int | float | str | time) -> int:
     """Настройка-длительность в минутах (значения int в DEFAULT_KEYS)."""
     return int(value)  # type: ignore[arg-type]
+
+
+def _as_hours(value: int | float | str | time) -> float:
+    """Настройка-длительность в часах (значения float в DEFAULT_KEYS)."""
+    return float(value)  # type: ignore[arg-type]
 
 
 def _as_hhmm(value: int | float | str | time) -> time:
@@ -785,17 +844,14 @@ def nap_window(
         build_sleep_intervals(events, now_local=now_local, day_start=day_start),
         _as_minutes(_setting_value(settings, "merge_threshold", merge_threshold_min)),
     )
-    # Незакрытый sleep (та же логика, что day_facts_lines): последняя
+    # Незакрытый sleep — единый хелпер (та же логика, что
+    # day_facts_lines; design D16, minor-3 review-001-1.1): последняя
     # запись — sleep без парного wake; его конец — не факт подъёма.
-    unclosed: SleepInterval | None = None
-    if merged and sorted(events, key=lambda item: item[1])[-1][0] == "sleep":
-        unclosed = merged[-1]
+    unclosed = _unclosed_interval(
+        sorted(events, key=lambda item: item[1]), merged,
+    )
     # Вечерняя граница «Отбоя» — из night_bounds «ЧЧ:ММ-ЧЧ:ММ» (начало).
-    raw_bounds = _setting_value(settings, "night_bounds", bedtime_from)
-    if isinstance(raw_bounds, str) and "-" in raw_bounds:
-        bedtime = _as_hhmm(raw_bounds.split("-")[0])
-    else:
-        bedtime = _as_hhmm(raw_bounds)
+    bedtime = _bedtime_from(settings, bedtime_from)
     rise = _page_rise(
         merged,
         unclosed,
@@ -833,4 +889,196 @@ def nap_window(
         after_deadline=window_start + timedelta(minutes=target_min) > deadline_dt,
         # Ранний подъём §3.6 (A6): всё окно не позже лимита 13:00.
         stretch_to_limit=window_end <= datetime.combine(rise.date(), stretch_limit),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Суммарное бодрствование и окно ночного сна (add-recommendations, задача
+# 1.2; design D16; ТЗ §4.5 задача 2, §3.3, §3.4; FR-29, FR-30;
+# research A3/A4).
+#
+# Арифметика бодрствования — ТОЛЬКО через `_bug004_total_wake` (единая
+# с фактом PB-3; вторая реализация формулы BUG-004 запрещена). Границы
+# диапазона и якоря ночи — из переданных настроек (design D14: ключи
+# wake_total_min / wake_total_max / night_target / night_deadline
+# пакета 1); дефолты — аргументные (= значения ТЗ §5 = DEFAULT_KEYS;
+# прямой импорт DEFAULT_KEYS в calculation запрещён — соответствие
+# фиксирует тест TC-REC-016).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NightWindow:
+    """Окно ухода в ночь: расчёт от суммарного бодрствования (FR-30).
+
+    Attributes:
+        wake_total: суммарное бодрствование на момент расчёта (единая
+            формула BUG-004 с фактом PB-3 — `total_wake_at`).
+        reach_lower: расчётный момент достижения НИЖНЕЙ границы
+            бодрствования (настройка wake_total_min, дефолт 12,0 ч);
+            граница уже достигнута — момент расчёта («окно сейчас»).
+        reach_upper: расчётный момент достижения ВЕРХНЕЙ границы
+            (wake_total_max, дефолт 12,5 ч); аналогично.
+        target: якорь целевого ухода в ночь (настройка night_target,
+            дефолт 22:00) в дату страницы момента расчёта.
+        deadline: якорь крайнего ухода в ночь (настройка
+            night_deadline, дефолт 22:30) в ту же дату.
+        later_than_deadline: True — расчётное достижение нижней
+            границы ПОЗЖЕ крайнего ухода (предупреждение FR-30:
+            «ночной сон может сдвинуться» — текст в волне 2).
+    """
+
+    wake_total: timedelta
+    reach_lower: datetime
+    reach_upper: datetime
+    target: datetime
+    deadline: datetime
+    later_than_deadline: bool
+
+
+def total_wake_at(
+    events: Iterable[tuple[str, datetime]],
+    now_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    day_start: time = DEFAULT_DAY_START,
+    merge_threshold_min: int = 20,
+    bedtime_from: time = time(19, 0),
+    rise_until: time = time(12, 0),
+) -> timedelta:
+    """Суммарное бодрствование на момент по формуле BUG-004 (FR-29).
+
+    ТА ЖЕ арифметика, что в факте «Бодрствование общее» PB-3:
+    `day_facts_lines` и эта функция считают через один хелпер
+    `_bug004_total_wake` (design D16: собственная арифметика подсказок
+    запрещена — исходный инцидент «суммы не сходятся»). База — факт
+    «Подъем» страницы (`_page_rise`; нет — day_start страницы); конец —
+    now_local; незакрытый ночной сон замораживает конец; дневной сон
+    вычитается; < 0 → 0 — см. докстринг хелпера. Факт PB-3 при тех же
+    входных даёт ТО ЖЕ значение (сценарий «Единая арифметика с PB-3»).
+
+    Args:
+        events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
+            naive datetime в TZ пользователя, любой порядок.
+        now_local: момент расчёта (закрывает незакрытый sleep), naive.
+        settings: настройки пользователя (dict, родные типы как в
+            SettingsService.get_all) или None — дефолты ТЗ §5.
+        day_start: граница страницы дня (настройка day_start, 06:00).
+        merge_threshold_min: порог склейки (настройка merge_threshold,
+            20 мин, design D9).
+        bedtime_from: вечерняя граница факта «Отбой» (из night_bounds).
+        rise_until: утренняя граница факта «Подъем».
+
+    Returns:
+        суммарное бодрствование на момент now_local (timedelta ≥ 0).
+    """
+    day_start = _as_hhmm(_setting_value(settings, "day_start", day_start))
+    page_date = day_page_of(now_local, day_start)
+    window_start = datetime.combine(page_date, day_start)
+    window_end = _day_page_end(page_date, day_start)
+    ordered = sorted(events, key=lambda item: item[1])
+    merged = merge_intervals(
+        build_sleep_intervals(events, now_local=now_local, day_start=day_start),
+        _as_minutes(_setting_value(settings, "merge_threshold", merge_threshold_min)),
+    )
+    unclosed = _unclosed_interval(ordered, merged)
+    rise = _page_rise(
+        merged,
+        unclosed,
+        page_date,
+        window_start,
+        window_end,
+        _bedtime_from(settings, bedtime_from),
+        rise_until,
+    )
+    return _bug004_total_wake(
+        merged, unclosed, rise, now_local, window_start, window_end,
+    )
+
+
+def night_window(
+    events: Iterable[tuple[str, datetime]],
+    now_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    day_start: time = DEFAULT_DAY_START,
+    merge_threshold_min: int = 20,
+    bedtime_from: time = time(19, 0),
+    rise_until: time = time(12, 0),
+    wake_total_min_h: float = 12.0,
+    wake_total_max_h: float = 12.5,
+    night_target: time = time(22, 0),
+    night_deadline: time = time(22, 30),
+) -> NightWindow:
+    """Окно ухода в ночь от суммарного бодрствования (FR-30; ТЗ §4.5
+    задача 2, §3.3, §3.4; design D16; research A3/A4).
+
+    Сравнение `total_wake_at` (единая формула BUG-004) с границами
+    12,0–12,5 ч: расчётный момент достижения границы — проекция
+    «бодрствование накапливается 1:1, будущих событий нет» (как прогноз
+    конца дневного сна — уточняется при следующем событии; корректна
+    при бодрствовании на момент расчёта). Окно ухода показывается
+    ЯКОРЯМИ night_target–night_deadline (дефолты 22:00–22:30) в дату
+    страницы момента расчёта; достижение нижней границы позже
+    night_deadline — флаг предупреждения (FR-30, «ночной сон может
+    сдвинуться»; текст — волна 2). Позиция к диапазону (ниже/в/выше —
+    §4.6) различается моментами reach_lower/reach_upper против
+    now_local.
+
+    Args:
+        events: сырые пары (event_type, timestamp), naive, любой порядок.
+        now_local: момент расчёта, naive datetime в TZ пользователя.
+        settings: настройки пользователя (dict) или None — дефолты ТЗ §5.
+        day_start: граница страницы дня (настройка day_start, 06:00).
+        merge_threshold_min: порог склейки (настройка merge_threshold).
+        bedtime_from: вечерняя граница факта «Отбой» (из night_bounds).
+        rise_until: утренняя граница факта «Подъем».
+        wake_total_min_h: дефолт нижней границы бодрствования, ч
+            (настройка wake_total_min — 12,0).
+        wake_total_max_h: дефолт верхней границы бодрствования, ч
+            (настройка wake_total_max — 12,5).
+        night_target: дефолт целевого ухода в ночь (настройка
+            night_target — 22:00).
+        night_deadline: дефолт крайнего ухода в ночь (настройка
+            night_deadline — 22:30).
+
+    Returns:
+        NightWindow для страницы дня момента расчёта.
+    """
+    wake_total = total_wake_at(
+        events,
+        now_local,
+        settings,
+        day_start=day_start,
+        merge_threshold_min=merge_threshold_min,
+        bedtime_from=bedtime_from,
+        rise_until=rise_until,
+    )
+    min_wake = timedelta(hours=_as_hours(
+        _setting_value(settings, "wake_total_min", wake_total_min_h)
+    ))
+    max_wake = timedelta(hours=_as_hours(
+        _setting_value(settings, "wake_total_max", wake_total_max_h)
+    ))
+    # Граница уже достигнута — «окно сейчас»: проекция не уходит в
+    # прошлое, моментом достижения считается момент расчёта.
+    reach_lower = now_local + max(timedelta(0), min_wake - wake_total)
+    reach_upper = now_local + max(timedelta(0), max_wake - wake_total)
+    page_date = day_page_of(
+        now_local, _as_hhmm(_setting_value(settings, "day_start", day_start))
+    )
+    target = datetime.combine(
+        page_date, _as_hhmm(_setting_value(settings, "night_target", night_target))
+    )
+    deadline = datetime.combine(
+        page_date,
+        _as_hhmm(_setting_value(settings, "night_deadline", night_deadline)),
+    )
+    return NightWindow(
+        wake_total=wake_total,
+        reach_lower=reach_lower,
+        reach_upper=reach_upper,
+        target=target,
+        deadline=deadline,
+        later_than_deadline=reach_lower > deadline,
     )

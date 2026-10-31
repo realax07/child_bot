@@ -208,17 +208,18 @@ def test_time_now_creates_sleep_event_and_answers_7_5(db_path, conn, frozen_now)
     # Ответ §7.5: подтверждение + «Сон идёт.» + сводка событий дня (PB-3):
     # только что созданный незакрытый дневной отрезок 12:00 — строка
     # «Заснул» (без «Проснулся» — сон продолжается); строк «Крайнее
-    # пробуждение» и «Окно» нет.
+    # пробуждение» и «Окно» нет. Ред. BUG-004: база day_start (подъёма
+    # нет), конец — момент расчёта 12:00 → 6 ч.
     assert len(update.effective_message.replies) == 1
     answer = update.effective_message.replies[0]
     assert answer.splitlines() == [
         "✅ Засыпание записано в 12:00.",
         "Сон идёт.",
         "Заснул: 12:00",
-        "Бодрствование общее: 24 ч",
+        "Бодрствование общее: 6 ч",
     ]
     assert answer == fell_asleep_text(
-        "12:00", ["Заснул: 12:00", "Бодрствование общее: 24 ч"]
+        "12:00", ["Заснул: 12:00", "Бодрствование общее: 6 ч"]
     )
     assert "Крайнее пробуждение" not in answer
     assert "Окно" not in answer
@@ -254,12 +255,13 @@ def test_time_now_creates_wake_event_and_answers_7_2_without_window(db_path, con
         "Заснул: 11:00",
         "Проснулся: 12:00",
         "Дневной сон: 1 ч",
-        "Бодрствование общее: 23 ч",
+        # Ред. BUG-004: (12:00 − 06:00) − 1 ч дневного сна = 5 ч.
+        "Бодрствование общее: 5 ч",
     ]
     assert answer == woke_up_text(
         "12:00",
         ["Заснул: 11:00", "Проснулся: 12:00", "Дневной сон: 1 ч",
-         "Бодрствование общее: 23 ч"],
+         "Бодрствование общее: 5 ч"],
     )
     assert "Окно" not in answer
     assert "Крайнее пробуждение" not in answer
@@ -326,7 +328,7 @@ def test_latest_wake_line_removed_from_answer(db_path, conn, frozen_now):
     # review-001-2.3 major 1: время — из фикстуры, не из реального now).
     assert answer.splitlines()[0] == "✅ Засыпание записано в 12:00."
     assert answer.splitlines()[1] == "Сон идёт."
-    assert answer.splitlines()[-1] == "Бодрствование общее: 24 ч"
+    assert answer.splitlines()[-1] == "Бодрствование общее: 6 ч"
 
 
 def test_observer_press_is_ignored_with_polite_message(db_path, conn):

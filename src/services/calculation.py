@@ -347,22 +347,6 @@ def daily_summary(
     )
 
 
-def _window_sleep_coverage(
-    merged: Iterable[SleepInterval],
-    window_start: datetime,
-    window_end: datetime,
-) -> timedelta:
-    """Фактическое покрытие окна страницы сном (сквозные интервалы
-    обрезаются по границе окна) — база «Бодрствование общее» PB-3."""
-    covered = timedelta()
-    for interval in merged:
-        overlap_start = max(interval.start_local, window_start)
-        overlap_end = min(interval.end_local, window_end)
-        if overlap_end > overlap_start:
-            covered += overlap_end - overlap_start
-    return covered
-
-
 def day_facts_lines(
     events: Iterable[tuple[str, datetime]],
     page_date: date,
@@ -405,9 +389,16 @@ def day_facts_lines(
         (утренние/дневные эпизоды) «Отбой» не создают;
       - «Ночной сон: H ч M мин» — суммарно по завершённым ночным
         отрезкам страницы (строка только если такой был);
-      - «Бодрствование общее: H ч M мин» — окно страницы (day_start →
-        day_start следующего дня) минус фактическое покрытие сном
-        (склейка учтена, D9) — выводится всегда.
+      - «Бодрствование общее: H ч M мин» — (момент расчёта − Подъем) −
+        покрытие ДНЕВНЫМ сном в интервале [Подъем; момент расчёта]
+        (ред. BUG-004, решение продакта 31.10): база — факт «Подъем»
+        (нет подъёма — day_start страницы); конец — момент расчёта
+        now_local (при now_local=None — конец окна страницы, страница
+        закрыта); идущий незакрытый НОЧНОЙ сон замораживает конец на
+        своём начале (после отбоя ребёнок не бодрствует); незакрытый
+        ДНЕВНОЙ сон вычитается до now_local (сон, не бодрствование);
+        ночное покрытие не вычитается (в базе от подъёма его нет);
+        отрицательный результат → 0. Выводится всегда.
     Суммарный сон за день НЕ вычисляется и НЕ выводится (может
     превышать 24 ч из-за ночной страницы — design D8, «сумма сна смысла
     не имеет»). Отнесение фактов к странице — по окну страницы
@@ -457,6 +448,7 @@ def day_facts_lines(
 
     night_in_page: list[SleepInterval] = []
     day_in_page: list[SleepInterval] = []
+    rise_end: datetime | None = None
     for interval in merged:
         if not (window_start <= interval.start_local < window_end):
             continue
@@ -512,7 +504,8 @@ def day_facts_lines(
             i for i in rise_candidates if i.end_local.date() == page_date
         ]
         chosen = page_morning or rise_candidates
-        lines.append(f"{texts.FACT_RISE}: {chosen[-1].end_local:%H:%M}")
+        rise_end = chosen[-1].end_local
+        lines.append(f"{texts.FACT_RISE}: {rise_end:%H:%M}")
 
     for interval in day_in_page:
         lines.append(f"{texts.FACT_FELL_ASLEEP}: {interval.start_local:%H:%M}")
@@ -540,8 +533,29 @@ def day_facts_lines(
         total = sum((i.duration for i in closed_night), timedelta())
         lines.append(f"{texts.FACT_NIGHT_SLEEP}: {texts.format_duration(total)}")
 
-    total_wake = (window_end - window_start) - _window_sleep_coverage(
-        merged, window_start, window_end
-    )
+    # «Бодрствование общее» (ред. BUG-004, решение продакта 31.10):
+    # (момент расчёта − Подъем) − покрытие ДНЕВНЫМ сном в [база; конец].
+    # База — факт «Подъем» (нет — day_start страницы); конец — момент
+    # расчёта now_local (нет — конец окна страницы); незакрытый ночной
+    # сон (идёт ночь) замораживает конец на своём начале; незакрытый
+    # дневной сон вычитается до now_local (его конец уже now_local —
+    # build_sleep_intervals); ночное покрытие не вычитается; < 0 → 0.
+    wake_base = rise_end if rise_end is not None else window_start
+    wake_end = now_local if now_local is not None else window_end
+    if unclosed is not None and classify_sleep(
+        unclosed.start_local, unclosed.end_local
+    ).is_night:
+        wake_end = unclosed.start_local
+    day_covered = timedelta()
+    for interval in merged:
+        if classify_sleep(interval.start_local, interval.end_local).is_night:
+            continue
+        overlap_start = max(interval.start_local, wake_base)
+        overlap_end = min(interval.end_local, wake_end)
+        if overlap_end > overlap_start:
+            day_covered += overlap_end - overlap_start
+    total_wake = (wake_end - wake_base) - day_covered
+    if total_wake < timedelta(0):
+        total_wake = timedelta(0)
     lines.append(f"{texts.FACT_TOTAL_WAKE}: {texts.format_duration(total_wake)}")
     return lines

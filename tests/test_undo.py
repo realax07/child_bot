@@ -252,11 +252,13 @@ def test_undo_after_backfill_removes_latest_by_created_at(
     rows = SleepEventsRepo(conn).list_by_user(user_id)
     assert [e["event_type"] for e in rows] == ["wake"]  # backfilled-sleep удалён
     assert state.get_state(conn, user_id) == state.STATE_AWAKE
-    # 11:30 UTC = 14:30 МСК; остался wake 12:00 UTC = 15:00 МСК
+    # 11:30 UTC = 14:30 МСК; остался wake 12:00 UTC = 15:00 МСК.
+    # Ред. BUG-004: подъёма нет → база day_start 06:00, конец — now
+    # 18:00 МСК → 12 ч.
     assert update.effective_message.replies == [
         "Отменено: Заснул 14:30.\n\n"
         "Записей за сегодня: 1.\n"
-        "Бодрствование общее: 24 ч"
+        "Бодрствование общее: 12 ч"
     ]
 
 

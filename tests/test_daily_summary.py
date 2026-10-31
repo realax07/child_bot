@@ -411,3 +411,103 @@ def test_tc_sum_017_facts_day_lines_unchanged() -> None:
     assert "Отбой:" not in joined
     assert "Ночной сон:" not in joined
     assert "Подъем:" not in joined
+
+
+def test_tc_sum_018_facts_next_day_morning_nap_no_rise_override() -> None:
+    """TC-SUM-018 (major-1 review-002-6.1, контр-кейс C5): подъем 07:00
+    10.10 (ночь 21:00 накануне) и ОТДЕЛЬНЫЙ утренний сон 05:30–05:45 на
+    СЛЕДУЮЩИЙ день (11.10) — страница 10.10 показывает «Подъем: 07:00»:
+    ранний утренний сон чужой страницы не подавляет и не подменяет
+    «Подъем» (сравнение по полному datetime с привязкой к ночи конца
+    кандидата, а не по time-of-day; приоритет конца в дату страницы)."""
+    events = [
+        ("sleep", _dt(9, 21, 0)),
+        ("wake", _dt(10, 7, 0)),
+        ("sleep", _dt(11, 5, 30)),
+        ("wake", _dt(11, 5, 45)),
+    ]
+    lines = day_facts_lines(events, page_date=date(2026, 10, 10))
+
+    assert lines == [
+        "Подъем: 07:00",
+        "Ночной сон: 15 мин",  # утренний сон 11.10 попал в окно по D8
+        "Бодрствование общее: 22 ч 45 мин",  # 24 ч − 1:00 − 0:15
+    ]
+    joined = "\n".join(lines)
+    assert "Подъем: 07:00" in joined
+    assert "05:45" not in joined  # конец утреннего сна 11.10 НЕ «Подъем»
+
+
+def test_tc_sum_019_facts_far_future_nap_no_rise_override() -> None:
+    """TC-SUM-019 (major-1 review-002-6.1, контр-кейс C5b): тот же подъем
+    07:00 10.10, но утренний сон 05:30–05:45 через 40 дней (20.11) —
+    «Подъем: 07:00» на месте: ночной отрезок чужой даты НЕ подавляет
+    «Подъем» вовсе (time-of-day сравнение до фикса исчезало)."""
+    events = [
+        ("sleep", _dt(9, 21, 0)),
+        ("wake", _dt(10, 7, 0)),
+        ("sleep", datetime(2026, 11, 20, 5, 30)),
+        ("wake", datetime(2026, 11, 20, 5, 45)),
+    ]
+    lines = day_facts_lines(events, page_date=date(2026, 10, 10))
+
+    assert lines == [
+        "Подъем: 07:00",
+        "Бодрствование общее: 23 ч",
+    ]
+
+
+def test_tc_sum_020_facts_night_awakening_suppressed_within_same_night() -> None:
+    """TC-SUM-020 (регресс minor-1, major-1 review-002-6.1): отбой 21:00,
+    ночное пробуждение 01:00–01:20, сон до 07:00 — семантика minor-1 не
+    вернулась: конец 01:00 подавлен отрезком той же ночи (начало 01:20 в
+    пределах ночного окна конца 01:00), страница отбоя 10.10 — один
+    «Отбой: 21:00», «Подъем» НЕТ; страница утра 11.10 — ровно один
+    «Подъем: 07:00», «Отбой» нет (attributions по design D8)."""
+    events = [
+        ("sleep", _dt(10, 21, 0)),
+        ("wake", _dt(11, 1, 0)),
+        ("sleep", _dt(11, 1, 20)),
+        ("wake", _dt(11, 7, 0)),
+    ]
+    lines = day_facts_lines(
+        events, page_date=date(2026, 10, 10), merge_threshold_min=20
+    )
+    assert lines == [
+        "Отбой: 21:00",
+        "Ночной сон: 9 ч 40 мин",  # 4:00 (21:00–01:00) + 5:40 (01:20–07:00)
+        "Бодрствование общее: 15 ч 20 мин",  # 24 ч − 8:40 покрытия окном
+    ]
+    joined = "\n".join(lines)
+    assert joined.count("Отбой:") == 1
+    assert "Подъем:" not in joined
+
+    # Страница утра (11.10): та же ночь даёт ровно один «Подъем: 07:00».
+    morning = day_facts_lines(
+        events, page_date=date(2026, 10, 11), merge_threshold_min=20
+    )
+    assert morning == [
+        "Подъем: 07:00",
+        "Бодрствование общее: 23 ч",  # покрытие 06:00→07:00 = 1:00
+    ]
+    assert "\n".join(morning).count("Подъем:") == 1
+    assert "Отбой:" not in "\n".join(morning)
+
+
+def test_tc_sum_021_facts_early_morning_rise_kept_on_bedtime_page() -> None:
+    """TC-SUM-021 (регресс major-1 review-002-6.1): ночной сон 21:00→04:50
+    (подъем до начала страницы утра) — «Подъем: 04:50» остается на
+    странице отбоя 10.10 (конец в окне страницы по D8): подавление по
+    ночному окну не убрало легитимный ранний подъем этой же ночи."""
+    events = [
+        ("sleep", _dt(10, 21, 0)),
+        ("wake", _dt(11, 4, 50)),
+    ]
+    lines = day_facts_lines(events, page_date=date(2026, 10, 10))
+
+    assert lines == [
+        "Подъем: 04:50",
+        "Отбой: 21:00",
+        "Ночной сон: 7 ч 50 мин",
+        "Бодрствование общее: 16 ч 10 мин",  # 24 ч − покрытие 21:00→04:50
+    ]

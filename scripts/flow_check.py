@@ -98,6 +98,28 @@ def archived_delta_problems(repo: Path) -> dict[str, list[str]]:
     master_text = "\n".join(
         sf.read_text(encoding="utf-8") for sf in specs_root.rglob("spec.md")
     ) if specs_root.is_dir() else ""
+    # Требования, снятые REMOVED-декларацией любого archived-пакета: старая
+    # дельта с ADDED/MODIFIED такого требования не должна фейлить контракт 7 —
+    # оно легитимно исчезло из master-spec (redesign-console снял требование
+    # r3 «поверх токенов V3», заменив на «Пульт»).
+    removed_anywhere: set[str] = set()
+    for d in sorted(p for p in arch_dir.iterdir() if p.is_dir()):
+        ds_root = d / "specs"
+        if not ds_root.is_dir():
+            continue
+        for ds in sorted(ds_root.rglob("spec.md")):
+            m_all = re.search(
+                r"##\s*REMOVED Requirements.*?(?=^##\s|\Z)",
+                ds.read_text(encoding="utf-8"), re.M | re.S,
+            )
+            if m_all:
+                removed_anywhere.update(
+                    t.strip()
+                    for t in re.findall(
+                        r"^(?:-\s*)?###\s*Requirement:\s*(.+)$",
+                        m_all.group(0), re.M,
+                    )
+                )
     for d in sorted(p for p in arch_dir.iterdir() if p.is_dir()):
         missing: list[str] = []
         delta_specs = d / "specs"
@@ -114,7 +136,10 @@ def archived_delta_problems(repo: Path) -> dict[str, list[str]]:
                     if removed and f"### Requirement: {title}" in removed.group(0):
                         if f"### Requirement: {title}" in master_text:
                             missing.append(f"REMOVED '{title}' все еще в master-spec")
-                    elif f"### Requirement: {title}" not in master_text:
+                    elif (
+                        title not in removed_anywhere
+                        and f"### Requirement: {title}" not in master_text
+                    ):
                         missing.append(f"'{title}' не слит в master-spec")
         problems[d.name] = missing
     return problems

@@ -9,11 +9,15 @@
 Интервалы сна из сырых событий: FR-13; design D6; ТЗ §10.5.
 Склейка коротких пробуждений: FR-13, FR-14; design D9; ТЗ §4.3.
 Сводка за день на лету: FR-3, FR-12, FR-19; design D6, D8.
+Сводка событий дня в подтверждениях (PB-3, волна 6): FR-7/FR-8/FR-19
+в ред. волны 6; решение продакта 29.10; design D7, D8.
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+
+from src import texts
 
 #: Текст предупреждения FR-10 (ТЗ §4.2, дословно).
 LATE_DAY_SLEEP_WARNING = "Поздний дневной сон может сдвинуть ночной"
@@ -341,3 +345,140 @@ def daily_summary(
         total_wake=total_wake,
         sleep_intervals=attributed,
     )
+
+
+def _window_sleep_coverage(
+    merged: Iterable[SleepInterval],
+    window_start: datetime,
+    window_end: datetime,
+) -> timedelta:
+    """Фактическое покрытие окна страницы сном (сквозные интервалы
+    обрезаются по границе окна) — база «Бодрствование общее» PB-3."""
+    covered = timedelta()
+    for interval in merged:
+        overlap_start = max(interval.start_local, window_start)
+        overlap_end = min(interval.end_local, window_end)
+        if overlap_end > overlap_start:
+            covered += overlap_end - overlap_start
+    return covered
+
+
+def day_facts_lines(
+    events: Iterable[tuple[str, datetime]],
+    page_date: date,
+    day_start: time = DEFAULT_DAY_START,
+    now_local: datetime | None = None,
+    merge_threshold_min: int = 20,
+) -> list[str]:
+    """Строки фактов дня для подтверждений (PB-3, волна 6; FR-7/FR-8/FR-19
+    в ред. волны 6; решение продакта 29.10).
+
+    Формат продакта (backlog PB-3, утверждён Заказчиком 29.10): список
+    ФАКТИЧЕСКИХ событий дня страницы + «Бодрствование общее». Единая
+    точка сборки для всех трёх подтверждений (§7.5 засыпание, §7.2
+    пробуждение, §7.14 ввод задним числом) — форматирование НЕ дублируется
+    по хендлерам.
+
+    Правила вывода (строка только при наличии факта):
+      - «Подъем: HH:MM» — конец первого ЗАВЕРШЁННОГО ночного отрезка,
+        окончившегося в окне страницы (подъём утра этой страницы; ночной
+        сон мог начаться вечером предыдущего дня);
+      - «Заснул: HH:MM» / «Проснулся: HH:MM» — дневные отрезки (D7),
+        начавшиеся в окне страницы, после склейки (D9); незакрытый
+        отрезок — только «Заснул»;
+      - «Дневной сон: H ч M мин» — суммарно по завершённым дневным
+        отрезкам страницы (строка только если такой был);
+      - «Отбой: HH:MM» — начало последнего ночного отрезка страницы
+        (уход в ночь);
+      - «Ночной сон: H ч M мин» — суммарно по завершённым ночным
+        отрезкам страницы (строка только если такой был);
+      - «Бодрствование общее: H ч M мин» — окно страницы (day_start →
+        day_start следующего дня) минус фактическое покрытие сном
+        (склейка учтена, D9) — выводится всегда.
+    Суммарный сон за день НЕ вычисляется и НЕ выводится (может
+    превышать 24 ч из-за ночной страницы — design D8, «сумма сна смысла
+    не имеет»). Отнесение фактов к странице — по окну страницы
+    (day_start → day_start следующего дня, design D8): Подъем — по
+    моменту конца в окне (подъём утра этой страницы), остальные
+    отрезки — по моменту начала.
+
+    Чистая функция: БД не касается, хранимых агрегатов не создаёт.
+
+    Args:
+        events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
+            naive datetime в TZ пользователя, любой порядок.
+        page_date: календарная дата страницы дня.
+        day_start: граница страницы дня (настройка, дефолт 06:00).
+        now_local: момент расчёта (закрывает незакрытый sleep);
+            naive datetime в TZ пользователя или None.
+        merge_threshold_min: порог склейки в минутах (из settings,
+            FR-24).
+
+    Returns:
+        list[str] — строки фактов в порядке продакта; для пустого дня —
+        только «Бодрствование общее».
+    """
+    ordered = sorted(events, key=lambda item: item[1])
+    merged = merge_intervals(
+        build_sleep_intervals(events, now_local=now_local, day_start=day_start),
+        merge_threshold_min,
+    )
+
+    window_start = datetime.combine(page_date, day_start)
+    window_end = _day_page_end(page_date, day_start)
+
+    # Незакрытый sleep: последняя запись — sleep без парного wake; это
+    # ВСЕГДА последний построенный интервал (его конец — не факт).
+    unclosed: SleepInterval | None = None
+    if ordered and ordered[-1][0] == "sleep" and merged:
+        unclosed = merged[-1]
+
+    def closed(interval: SleepInterval) -> bool:
+        return interval is not unclosed
+
+    night_in_page: list[SleepInterval] = []
+    day_in_page: list[SleepInterval] = []
+    for interval in merged:
+        if not (window_start <= interval.start_local < window_end):
+            continue
+        if classify_sleep(interval.start_local, interval.end_local).is_night:
+            night_in_page.append(interval)
+        else:
+            day_in_page.append(interval)
+
+    lines: list[str] = []
+
+    # Подъем: конец первого завершённого ночного отрезка, окончившегося
+    # в окне страницы (ночь могла начаться ещё вечером предыдущего дня).
+    for interval in merged:
+        if (
+            classify_sleep(interval.start_local, interval.end_local).is_night
+            and closed(interval)
+            and window_start < interval.end_local <= window_end
+        ):
+            lines.append(f"{texts.FACT_RISE}: {interval.end_local:%H:%M}")
+            break
+
+    for interval in day_in_page:
+        lines.append(f"{texts.FACT_FELL_ASLEEP}: {interval.start_local:%H:%M}")
+        if closed(interval):
+            lines.append(f"{texts.FACT_WOKE_UP}: {interval.end_local:%H:%M}")
+
+    closed_day = [i for i in day_in_page if closed(i)]
+    if closed_day:
+        total = sum((i.duration for i in closed_day), timedelta())
+        lines.append(f"{texts.FACT_DAY_SLEEP}: {texts.format_duration(total)}")
+
+    if night_in_page:
+        lines.append(f"{texts.FACT_BEDTIME}: {night_in_page[-1].start_local:%H:%M}")
+
+    closed_night = [i for i in night_in_page if closed(i)]
+    if closed_night:
+        total = sum((i.duration for i in closed_night), timedelta())
+        lines.append(f"{texts.FACT_NIGHT_SLEEP}: {texts.format_duration(total)}")
+
+    total_wake = (window_end - window_start) - _window_sleep_coverage(
+        merged, window_start, window_end
+    )
+    lines.append(f"{texts.FACT_TOTAL_WAKE}: {texts.format_duration(total_wake)}")
+    return lines

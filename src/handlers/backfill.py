@@ -29,9 +29,12 @@
 # Задача 4.5 (FR-19, design D6/D10; ТЗ §7.14; решение ОВ-ПО-2): успешный
 # ввод задним числом — и прямой записью (create_event, is_backfilled=1),
 # и через «Изменить» в конфликте — отвечает §7.14: подтверждающая строка
-# + обновлённая сводка за день (суммарные сон/бодрствование через
-# calculation.daily_summary по СТРАНИЦЕ ДНЯ вводимого времени); строки
-# окон НЕ выводятся (окна — Пакет 2).
+# + обновлённая сводка за день по СТРАНИЦЕ ДНЯ вводимого времени. С волны 6
+# (PB-3, задача 6.1) вместо абстрактных сумм сон/бодрствование — список
+# фактических событий дня (формат продакта): сборка — events.day_summary_lines
+# (ЕДИНАЯ точка для всех трёх подтверждений, без дублей форматирования);
+# суммарный сон за день НЕ вычисляется (может превышать 24 ч из-за ночной
+# страницы — design D8); строки окон НЕ выводятся (окна — Пакет 2).
 #
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
@@ -44,7 +47,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -55,19 +58,14 @@ from src.handlers.events import (
     OBSERVER_DENIED,
     PENDING_KIND_KEY,
     WAIT_EVENT_TIME_KEY,
+    day_summary_lines,
 )
 from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, resolve_tz
-from src.services.calculation import (
-    DEFAULT_DAY_START,
-    daily_summary,
-    day_page_of,
-)
 from src.services.event import (
     ROLE_OBSERVER,
     create_event,
     detect_conflict,
     get_user,
-    list_raw_events,
     overwrite_event,
 )
 from src.services.settings import SettingsService
@@ -148,57 +146,22 @@ def _local_hhmm(utc_moment: str | datetime, tz_name: str | None) -> str:
     return utc_moment.astimezone(resolve_tz(tz_name or "")).strftime("%H:%M")
 
 
-def _settings_day_start(raw: str) -> time:
-    """«ЧЧ:ММ» настройки day_start → time; фолбэк — дефолт расчётов (D8)."""
-    try:
-        hh, mm = raw.split(":")
-        return time(int(hh), int(mm))
-    except (AttributeError, ValueError):
-        return DEFAULT_DAY_START
-
-
-def _naive_local(utc_str: str, tz_name: str | None) -> datetime:
-    """Строка UTC БД «YYYY-MM-DD HH:MM:SS» → naive datetime в поясе (D4)."""
-    moment = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
-    return moment.astimezone(resolve_tz(tz_name or "")).replace(tzinfo=None)
-
-
 def _backfill_success_text(
     conn: sqlite3.Connection, user: dict, when_utc: str
 ) -> str:
-    """Ответ §7.14 (FR-19, задача 4.5): подтверждение + сводка за день.
+    """Ответ §7.14 (FR-19 в ред. волны 6, PB-3, задача 6.1): подтверждение
+    + сводка событий дня.
 
-    Сводка — calculation.daily_summary по СТРАНИЦЕ ДНЯ вводимого времени
-    (design D6/D8), не по сегодняшней: суммарные сон/бодрствование,
-    строки окон не выводятся (Пакет 2, решение ОВ-ПО-2). Настройки
-    day_start / merge_threshold — из settings при каждом расчёте
-    (FR-24, design D14); сырые события — через сервис (design D1).
+    Сводка — фактические события дня СТРАНИЦЫ вводимого времени (design
+    D6/D8), не сегодняшней, в формате продакта (Подъем / Заснул /
+    Проснулся / Дневной сон / Отбой / Ночной сон + Бодрствование общее):
+    сборка — events.day_summary_lines (единая точка всех трёх
+    подтверждений); суммарный сон за день НЕ вычисляется (может
+    превышать 24 ч из-за ночной страницы — D8); строки окон не выводятся
+    (Пакет 2, решение ОВ-ПО-2).
     """
-    settings = SettingsService(conn)
-    user_id = user["id"]
-    tz_name = user["timezone"]
-    day_start = _settings_day_start(str(settings.get(user_id, "day_start")))
-    threshold = int(settings.get(user_id, "merge_threshold"))
-
-    events = [
-        (row["event_type"], _naive_local(row["timestamp"], tz_name))
-        for row in list_raw_events(conn, user_id)
-    ]
-    when_local = _naive_local(when_utc, tz_name)
-    page = day_page_of(when_local, day_start)
-    now_local = datetime.now(resolve_tz(tz_name or "")).replace(tzinfo=None)
-    summary = daily_summary(
-        events,
-        page,
-        day_start=day_start,
-        now_local=now_local,
-        merge_threshold_min=threshold,
-    )
-    return texts.backfill_success_text(
-        _local_hhmm(when_utc, tz_name), summary.total_sleep, summary.total_wake
-    )
+    lines = day_summary_lines(conn, user, when_utc)
+    return texts.backfill_success_text(_local_hhmm(when_utc, user["timezone"]), lines)
 
 
 async def backfill_time_message(

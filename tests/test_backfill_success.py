@@ -1,15 +1,18 @@
-# Юнит-тесты успешного ввода задним числом: §7.14 со сводкой без окон
-# (change-пакет add-core-diary, задача 4.5).
+# Юнит-тесты успешного ввода задним числом: §7.14 со сводкой событий дня
+# (change-пакет add-core-diary, задачи 4.5 + 6.1/PB-3).
 #
-# Критерии готовности 4.5 (FR-16, FR-19; design D6, D10; ТЗ §7.14; ОВ-ПО-2):
+# Критерии готовности 4.5 (FR-16, FR-19 в ред. волны 6; design D6, D10):
 #   - ввод «вчера 22:30» → событие создано с is_backfilled=1;
-#   - ответ §7.14: подтверждающая строка + обновлённая сводка за день
-#     (суммарные сон/бодрствование), строки окон НЕ выводятся
-#     (в тексте нет слова «Окно»);
+#   - ответ §7.14: подтверждающая строка + сводка событий дня в формате
+#     продакта (PB-3: Подъем/Заснул/Проснулся/Дневной сон/Отбой/Ночной сон
+#     + Бодрствование общее), БЕЗ абстрактных сумм «Сон: …»/
+#     «Бодрствование: …» и без строк окон (в тексте нет слова «Окно»);
 #   - конфликтный путь «Изменить» (conflict:overwrite) тоже завершается §7.14;
 #   - сводка считается по странице дня ВВОДИМОГО времени, не сегодняшней.
 #
 # Правило rule 6: каждый тест несёт TC-BFS-NNN в первой строке докстринга.
+# Время фиксируется в фикстуре frozen_now (monkeypatch backfill.datetime):
+# 8:00 МСК 10.10 — ассерты без «живых» ЧЧ:ММ (правило волны 6).
 
 from __future__ import annotations
 
@@ -28,6 +31,40 @@ from src.services.backfill_parser import resolve_tz
 from src.services.event import get_user
 
 TZ = ZoneInfo("Europe/Moscow")  # UTC+3, без перехода на летнее время
+
+# Фиксированный «сейчас» обработчика backfill: 8:00 МСК 10.10 (05:00 UTC).
+FIXED_NOW_LOCAL = datetime(2026, 10, 10, 8, 0, tzinfo=TZ)
+
+
+class _FrozenDatetime(datetime):
+    """datetime с замороженным now() — время теста фиксируется в фикстуре."""
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        if tz is not None:
+            return FIXED_NOW_LOCAL.astimezone(tz)
+        return FIXED_NOW_LOCAL.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def frozen_now(monkeypatch):
+    """Фиксировать «сейчас» для теста (правило волны 6).
+
+    events.datetime — замороженный класс (расчётный момент сводки и
+    «Сейчас»); backfill.parse_time_input — обёртка с фиксированным
+    моментом ввода (сам класс backfill.datetime НЕ подменяется: хендлер
+    проверяет isinstance(parsed, datetime), подмена класса сломала бы
+    guard задачи 4.2).
+    """
+    monkeypatch.setattr(events, "datetime", _FrozenDatetime)
+    real_parse = backfill.parse_time_input
+    monkeypatch.setattr(
+        backfill,
+        "parse_time_input",
+        lambda text, tz, now, max_age_days=None: real_parse(
+            text, tz, _FrozenDatetime.now(timezone.utc), max_age_days=max_age_days
+        ),
+    )
 
 # callback_data кнопки «Изменить» §7.13 (контракт задачи 4.4, ТЗ §10.3).
 CALLBACK_CONFLICT_OVERWRITE = "conflict:overwrite"
@@ -98,8 +135,9 @@ def conn(db_path):
 
 
 def _yesterday_at(hh: int, mm: int) -> datetime:
-    """Вчера ЧЧ:ММ по локальному времени пользователя (TZ = Москва)."""
-    day = (datetime.now(TZ) - timedelta(days=1)).date()
+    """Вчера ЧЧ:ММ по локальному времени относительно ФИКСИРОВАННОГО
+    «сейчас» (8:00 МСК 10.10) — время теста зафиксировано в фикстуре."""
+    day = (FIXED_NOW_LOCAL - timedelta(days=1)).date()
     return datetime(day.year, day.month, day.day, hh, mm, tzinfo=TZ)
 
 
@@ -137,10 +175,13 @@ def _press_overwrite(db_path, telegram_id: int, user_data: dict):
 # ------------------------------------------------------------------ Тесты
 
 
-def test_tc_bfs_001_backfill_creates_event_and_answers_7_14(db_path, conn):
-    """TC-BFS-001 (FR-16, FR-19, задача 4.5): ввод «вчера 22:30» → событие
-    с is_backfilled=1 и ответ §7.14: подтверждающая строка + сводка
-    сон/бодрствование, БЕЗ слова «Окно»; фазы диалога сняты."""
+def test_tc_bfs_001_backfill_creates_event_and_answers_7_14(db_path, conn, frozen_now):
+    """TC-BFS-001 (FR-16, FR-19 в ред. волны 6, PB-3): ввод «вчера 22:30» →
+    событие с is_backfilled=1 и ответ §7.14: подтверждающая строка +
+    сводка событий дня в формате продакта («Отбой: 22:30» — незакрытый
+    ночной отрезок страницы «вчера», «Бодрствование общее: 16 ч 30 мин»);
+    БЕЗ абстрактных сумм «Сон: …»/«Бодрствование: …» и без слова «Окно»;
+    фазы диалога сняты. Время зафиксировано: 8:00 МСК 10.10."""
     when = _yesterday_at(22, 30)
     user_data = {
         WAIT_EVENT_TIME_KEY: True,
@@ -148,13 +189,19 @@ def test_tc_bfs_001_backfill_creates_event_and_answers_7_14(db_path, conn):
     }
     update, context = _send_text(db_path, "вчера 22:30", user_data)
 
-    # Ответ §7.14: подтверждение с локальным временем + сводка, без окон.
+    # Ответ §7.14: подтверждение с локальным временем + факты дня (PB-3).
     assert len(update.effective_message.replies) == 1
     answer = update.effective_message.replies[0]
     assert f"✅ Событие записано на {_local_hhmm(when)}." in answer
     assert "Обновлённая сводка за день:" in answer
-    assert "Сон:" in answer
-    assert "Бодрствование:" in answer
+    assert answer.splitlines()[3:] == [
+        "Отбой: 22:30",
+        "Бодрствование общее: 16 ч 30 мин",
+    ]
+    # Старый абстрактный формат сумм («Сон: …» / «Бодрствование: …»)
+    # отсутствует; «Бодрствование общее» — не старый формат.
+    assert "Сон:" not in answer
+    assert "Бодрствование:" not in answer
     assert "Окно" not in answer
 
     # РОВНО одно событие, создано задним числом (is_backfilled=1).
@@ -170,12 +217,14 @@ def test_tc_bfs_001_backfill_creates_event_and_answers_7_14(db_path, conn):
     assert PENDING_KIND_KEY not in context.user_data
 
 
-def test_tc_bfs_002_conflict_overwrite_answers_7_14(db_path, conn):
-    """TC-BFS-002 (FR-18 + FR-19, задача 4.5): конфликтный путь «Изменить»
-    → уведомление о перезаписи (ОВ-ПО-1) И §7.14 со сводкой без «Окно»;
-    перезапись без дублей; фазы очищены."""
+def test_tc_bfs_002_conflict_overwrite_answers_7_14(db_path, conn, frozen_now):
+    """TC-BFS-002 (FR-18 + FR-19 в ред. волны 6, PB-3): конфликтный путь
+    «Изменить» → уведомление о перезаписи (ОВ-ПО-1) И §7.14 со сводкой
+    событий дня в формате продакта («Заснул: 06:00» — незакрытый дневной
+    отрезок, «Бодрствование общее: 22 ч») без «Окно»; перезапись без
+    дублей; фазы очищены. Время зафиксировано: 8:00 МСК 10.10."""
     user = get_user(conn, 5002)
-    wake_at = datetime.now(TZ) - timedelta(hours=2)
+    wake_at = FIXED_NOW_LOCAL - timedelta(hours=2)  # 06:00 МСК 10.10
     wake_id = _insert_event(conn, user["id"], "wake", wake_at)
 
     user_data = {
@@ -187,7 +236,7 @@ def test_tc_bfs_002_conflict_overwrite_answers_7_14(db_path, conn):
     }
     update, context = _press_overwrite(db_path, 5002, user_data)
 
-    # Уведомление ОВ-ПО-1, затем §7.14 со сводкой (без слова «Окно»).
+    # Уведомление ОВ-ПО-1, затем §7.14 с фактами дня (без слова «Окно»).
     assert len(update.effective_message.replies) == 2
     assert update.effective_message.replies[0] == texts.BACKFILL_OVERWRITTEN.format(
         label=texts.KIND_LABELS["sleep"],
@@ -196,8 +245,12 @@ def test_tc_bfs_002_conflict_overwrite_answers_7_14(db_path, conn):
     summary = update.effective_message.replies[1]
     assert f"✅ Событие записано на {_local_hhmm(wake_at)}." in summary
     assert "Обновлённая сводка за день:" in summary
-    assert "Сон:" in summary
-    assert "Бодрствование:" in summary
+    assert summary.splitlines()[3:] == [
+        "Заснул: 06:00",
+        "Бодрствование общее: 22 ч",
+    ]
+    assert "Сон:" not in summary  # абстрактных сумм старого формата нет
+    assert "Бодрствование:" not in summary
     assert "Окно" not in summary
 
     # РОВНО одно событие — перезаписано видом/временем нового ввода.
@@ -212,12 +265,15 @@ def test_tc_bfs_002_conflict_overwrite_answers_7_14(db_path, conn):
         assert key not in context.user_data
 
 
-def test_tc_bfs_003_summary_uses_entered_time_day_page(db_path, conn):
-    """TC-BFS-003 (FR-19, design D8, задача 4.5): сводка считается по
-    странице дня ВВОДИМОГО времени (вчера), не сегодняшней: незакрытый сон
-    с 21:00 вчера покрывает вчера 21:00→06:00 (9 ч окна), бодрствование
-    страницы «вчера» = 24 ч − 9 ч = 15 ч; ввод «вчера 20:00» (wake ДО
-    начала сна — без конфликта, D11: пересечения с интервалом нет)."""
+def test_tc_bfs_003_summary_uses_entered_time_day_page(db_path, conn, frozen_now):
+    """TC-BFS-003 (FR-19 в ред. волны 6, design D8, PB-3): сводка считается
+    по странице дня ВВОДИМОГО времени (вчера 09.10), не сегодняшней:
+    незакрытый сон с 21:00 вчера (ночной отрезок страницы «вчера») даёт
+    факты «Отбой: 21:00» и «Бодрствование общее: 15 ч» (окно 06:00→06:00,
+    покрыто 9 ч); ввод «вчера 20:00» (wake ДО начала сна — без конфликта,
+    D11: пересечения с интервалом нет). Время зафиксировано:
+    8:00 МСК 10.10 — расчёт детерминирован (раньше ассерт зависел от
+    реального now на границе суток)."""
     user = get_user(conn, 5003)
     _insert_event(conn, user["id"], "sleep", _yesterday_at(21, 0))
 
@@ -243,12 +299,16 @@ def test_tc_bfs_003_summary_uses_entered_time_day_page(db_path, conn):
     assert backfilled[0]["event_type"] == "wake"
     assert backfilled[0]["timestamp"] == _utc_str(_yesterday_at(20, 0))
 
-    # Числа сводки — страницы «вчера» (окно 06:00→06:00): бодрствование
-    # 15 ч (24 ч окна минус 9 ч сна 21:00→06:00). Сегодняшняя страница
-    # дала бы другое бодрствование; точное «Сон» зависит от момента
-    # расчёта (незакрытый сон) — проверяется только наличие строки.
-    assert "Бодрствование: 15 ч." in answer
-    assert "Сон:" in answer
+    # Факты страницы «вчера» (окно 06:00 09.10 → 06:00 10.10): незакрытый
+    # ночной отрезок 21:00 → «Отбой: 21:00», без «Ночной сон»/«Подъем»;
+    # бодрствование 15 ч (24 ч окна минус 9 ч покрытия до 06:00).
+    # bare wake 20:00 (без парного sleep) строку факта не даёт.
+    assert answer.splitlines()[3:] == [
+        "Отбой: 21:00",
+        "Бодрствование общее: 15 ч",
+    ]
+    assert "Сон:" not in answer  # абстрактных сумм старого формата нет
+    assert "Бодрствование:" not in answer
     # Фазы сняты.
     assert WAIT_EVENT_TIME_KEY not in context.user_data
     assert PENDING_KIND_KEY not in context.user_data

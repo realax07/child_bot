@@ -1,23 +1,25 @@
 # Юнит-тесты событийных кнопок и «🕐 Сейчас» (change-пакет add-core-diary,
-# задача 2.3).
+# задача 2.3; волна 6 — PB-3, задача 6.1).
 #
 # Критерии готовности 2.3 (FR-7, FR-8, FR-15; design D2, D5, D6):
 #   - event:sleep/event:wake → меню §7.10 (time:now / time:manual);
 #   - time:now создаёт событие с фактическим временем, is_backfilled=0,
-#     меню переключается, ответ §7.5 (с «Крайнее пробуждение» из настройки
-#     wake_deadline) / §7.2 (без строки окна — Пакет 2);
+#     меню переключается, ответ §7.5 / §7.2 со сводкой событий дня (PB-3);
+#   - волна 6 (решение продакта 29.10): строка «Крайнее пробуждение» в
+#     ответе НЕ выводится вовсе; строки окна нет (Пакет 2);
 #   - guard устаревшей кнопки (design D5): записи нет, answerCallbackQuery,
 #     клавиатура перерисована в актуальное состояние (F-3 review-001);
 #   - observer (design D13): нажатие игнорируется с вежливым сообщением;
 #   - повторный перевод состояния через меню корректен (sleep→wake→sleep).
 #
 # Правило rule 6: каждый тест несёт TC-EVNOW-NNN в первой строке докстринга.
+# Время фиксируется в фикстуре frozen_now (monkeypatch events.datetime):
+# 9:00 UTC = 12:00 МСК — ассерты без «живых» ЧЧ:ММ (правило волны 6).
 
 from __future__ import annotations
 
 import asyncio
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -91,6 +93,26 @@ class _FakeContext:
 
 # --------------------------------------------------------------- Фикстуры
 
+# Фиксированный «сейчас»: 9:00 UTC = 12:00 МСК (Европа/Москва, UTC+3).
+FIXED_NOW_UTC = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)
+
+
+class _FrozenDatetime(datetime):
+    """datetime с замороженным now() — время теста фиксируется в фикстуре."""
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        if tz is not None:
+            return FIXED_NOW_UTC.astimezone(tz)
+        return FIXED_NOW_UTC.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def frozen_now(monkeypatch):
+    """Фиксировать «сейчас» обработчика events (правило волны 6)."""
+    monkeypatch.setattr(events, "datetime", _FrozenDatetime)
+
+
 @pytest.fixture()
 def db_path(tmp_path):
     return tmp_path / "bot.db"
@@ -158,12 +180,13 @@ def test_event_button_opens_time_choose_menu_7_10(db_path, conn):
     assert _sleep_count(conn, user_id) == 0  # запись появится только после «Сейчас»
 
 
-def test_time_now_creates_sleep_event_and_answers_7_5(db_path, conn):
+def test_time_now_creates_sleep_event_and_answers_7_5(db_path, conn, frozen_now):
     """TC-EVNOW-002: «😴 Заснул» → «🕐 Сейчас» создаёт sleep-событие с
     фактическим временем (UTC, is_backfilled=0), меню переключается на
-    «☀️ Проснулся», ответ — §7.5 с фактическим временем и «Крайнее
-    пробуждение: 15:30» из настройки wake_deadline; строки окна нет
-    (FR-7, design D6)."""
+    «☀️ Проснулся», ответ — §7.5 с фактическим временем и сводкой событий
+    дня (PB-3): пустой день — только «Бодрствование общее: 24 ч»; БЕЗ
+    «Крайнее пробуждение» и без строки окна (FR-7 в ред. волны 6, D6).
+    Время зафиксировано: 9:00 UTC = 12:00 МСК."""
     user_id = _uid(conn)  # внутренний id пользователя telegram_id=1001
     _press(db_path, "event:sleep")  # открытие §7.10
     update, _ = _press(
@@ -176,38 +199,40 @@ def test_time_now_creates_sleep_event_and_answers_7_5(db_path, conn):
     assert event["event_type"] == "sleep"
     assert event["is_backfilled"] is False  # is_backfilled=0
     assert event["sleep_type"] is None and event["is_merged"] is None  # D6
-
-    created = datetime.strptime(event["timestamp"], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
-    assert abs((datetime.now(timezone.utc) - created).total_seconds()) < 300
+    assert event["timestamp"] == "2026-10-10 09:00:00"  # фиксированное «сейчас»
 
     # Меню переключилось (redraw по свежему состоянию, FR-6)
     texts_ = _button_texts(update.callback_query.message.reply_markup)
     assert state.BTN_WAKE in texts_ and state.BTN_SLEEP not in texts_
 
-    # Ответ §7.5 с фактическим временем; окно не выводится
+    # Ответ §7.5: подтверждение + «Сон идёт.» + сводка событий дня (PB-3):
+    # только что созданный незакрытый дневной отрезок 12:00 — строка
+    # «Заснул» (без «Проснулся» — сон продолжается); строк «Крайнее
+    # пробуждение» и «Окно» нет.
     assert len(update.effective_message.replies) == 1
     answer = update.effective_message.replies[0]
+    assert answer.splitlines() == [
+        "✅ Засыпание записано в 12:00.",
+        "Сон идёт.",
+        "Заснул: 12:00",
+        "Бодрствование общее: 24 ч",
+    ]
     assert answer == fell_asleep_text(
-        answer.split("в ")[1].split(".")[0], "15:30"
+        "12:00", ["Заснул: 12:00", "Бодрствование общее: 24 ч"]
     )
-    assert "✅ Засыпание записано в" in answer
-    assert "Крайнее пробуждение: 15:30" in answer
+    assert "Крайнее пробуждение" not in answer
     assert "Окно" not in answer
 
 
-def test_time_now_creates_wake_event_and_answers_7_2_without_window(db_path, conn):
+def test_time_now_creates_wake_event_and_answers_7_2_without_window(db_path, conn, frozen_now):
     """TC-EVNOW-003: «☀️ Проснулся» → «🕐 Сейчас» создаёт wake-событие,
-    меню переключается на «😴 Заснул», ответ — только подтверждающая строка
-    §7.2 («✅ Пробуждение записано в ЧЧ:ММ.») БЕЗ строки окна дневного сна
-    (FR-8, окна — Пакет 2)."""
+    меню переключается на «😴 Заснул», ответ — §7.2 с фактическим временем
+    и сводкой событий дня (PB-3): дневной сон 11:00→12:00 МСК как факты
+    «Заснул/Проснулся/Дневной сон», БЕЗ строки окна (FR-8 в ред. волны 6,
+    окна — Пакет 2). Время зафиксировано: 9:00 UTC = 12:00 МСК."""
     user_id = _uid(conn)  # внутренний id пользователя telegram_id=1001
-    # Сон, начатый час назад — точно в прошлом относительно «сейчас»
-    past = (
-        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
-    ).strftime("%Y-%m-%d %H:%M:%S")
-    SleepEventsRepo(conn).insert(user_id, "sleep", past)
+    # Сон, начатый час назад до ФИКСИРОВАННОГО «сейчас» (8:00 UTC = 11:00 МСК)
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-10-10 08:00:00")
     _press(db_path, "event:wake")
     update, _ = _press(
         db_path, CALLBACK_TIME_NOW, pending="wake"
@@ -223,11 +248,21 @@ def test_time_now_creates_wake_event_and_answers_7_2_without_window(db_path, con
 
     assert len(update.effective_message.replies) == 1
     answer = update.effective_message.replies[0]
-    assert answer == woke_up_text(answer.split("в ")[1].split(".")[0])
-    assert answer.startswith("✅ Пробуждение записано в ")
-    assert answer.rstrip().endswith(".")
+    # Факты дня (PB-3): дневной отрезок — после склейки, из сырых событий.
+    assert answer.splitlines() == [
+        "✅ Пробуждение записано в 12:00.",
+        "Заснул: 11:00",
+        "Проснулся: 12:00",
+        "Дневной сон: 1 ч",
+        "Бодрствование общее: 23 ч",
+    ]
+    assert answer == woke_up_text(
+        "12:00",
+        ["Заснул: 11:00", "Проснулся: 12:00", "Дневной сон: 1 ч",
+         "Бодрствование общее: 23 ч"],
+    )
     assert "Окно" not in answer
-    assert "\n" not in answer  # одна строка — без окна и без «Крайнего»
+    assert "Крайнее пробуждение" not in answer
 
 
 def test_stale_event_button_guard_blocks_creation(db_path, conn):
@@ -267,10 +302,13 @@ def test_stale_time_now_guard_blocks_creation(db_path, conn):
     assert state.BTN_WAKE in texts_  # перерисовано в актуальное состояние
 
 
-def test_latest_wake_line_comes_from_setting(db_path, conn):
-    """TC-EVNOW-006: строка «Крайнее пробуждение: …» в §7.5 берётся из
-    настройки wake_deadline (ТЗ §5, FR-7), не из константы: сменили
-    настройку на 16:00 — текст ответа меняется."""
+def test_latest_wake_line_removed_from_answer(db_path, conn, frozen_now):
+    """TC-EVNOW-006 (волна 6, решение продакта 29.10, PB-3): строка
+    «Крайнее пробуждение: …» в подтверждении засыпания НЕ выводится
+    ВОВСЕ — даже при заданной настройке wake_deadline (16:00): норма
+    постоянна, остаётся только в настройках (Пакет 3) и подсказках
+    Пакета 2. Вместо неё — сводка событий дня с «Бодрствование общее».
+    Время зафиксировано: 9:00 UTC = 12:00 МСК."""
     user_id = _uid(conn)  # внутренний id пользователя telegram_id=1001
     SettingsService(conn).seed_defaults(user_id)
     SettingsRepo(conn).upsert(user_id, "wake_deadline", "16:00")
@@ -281,14 +319,14 @@ def test_latest_wake_line_comes_from_setting(db_path, conn):
     )
 
     answer = update.effective_message.replies[0]
-    lines = answer.splitlines()
-    # Детерминированно (review-001-2.3, major 1): не сравниваем время
-    # первой строки с реальным временем запуска — ассертим структуру §7.5:
-    # строка 1 — «✅ Засыпание записано в ЧЧ:ММ.», строка 2 — дословно
-    # из настройки wake_deadline=16:00 (суть теста — источник строки).
-    assert len(lines) == 2
-    assert re.fullmatch(r"✅ Засыпание записано в \d{2}:\d{2}\.", lines[0])
-    assert lines[1] == "Сон идёт. Крайнее пробуждение: 16:00."
+    assert "Крайнее пробуждение" not in answer
+    assert "16:00" not in answer
+    assert "Бодрствование общее: " in answer
+    # Структура §7.5: подтверждение + «Сон идёт.» + сводка (детерминированно,
+    # review-001-2.3 major 1: время — из фикстуры, не из реального now).
+    assert answer.splitlines()[0] == "✅ Засыпание записано в 12:00."
+    assert answer.splitlines()[1] == "Сон идёт."
+    assert answer.splitlines()[-1] == "Бодрствование общее: 24 ч"
 
 
 def test_observer_press_is_ignored_with_polite_message(db_path, conn):

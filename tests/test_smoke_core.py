@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -53,6 +53,40 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SPEC_FILE = _REPO_ROOT / "ТЗ_Дневник_сна_ребёнка.md"
 
 TELEGRAM_ID = 9001
+
+# Фиксированное «сейчас» сценария: 9:00 UTC = 12:00 МСК 10.10 (правило
+# волны 6 — время фиксируется в фикстуре, ассерты без «живых» ЧЧ:ММ).
+FIXED_NOW_UTC = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)
+
+
+class _FrozenDatetime(datetime):
+    """datetime с замороженным now() — время сценария детерминировано."""
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        if tz is not None:
+            return FIXED_NOW_UTC.astimezone(tz)
+        return FIXED_NOW_UTC.replace(tzinfo=None)
+
+
+@pytest.fixture()
+def frozen_now(monkeypatch):
+    """Фиксировать «сейчас» для сценария (правило волны 6).
+
+    events.datetime — замороженный класс («Сейчас» и расчётный момент
+    сводки); backfill.parse_time_input — обёртка с фиксированным
+    моментом ввода (класс backfill.datetime НЕ подменяется: хендлер
+    проверяет isinstance(parsed, datetime)).
+    """
+    monkeypatch.setattr(events, "datetime", _FrozenDatetime)
+    real_parse = backfill.parse_time_input
+    monkeypatch.setattr(
+        backfill,
+        "parse_time_input",
+        lambda text, tz, now, max_age_days=None: real_parse(
+            text, tz, _FrozenDatetime.now(timezone.utc), max_age_days=max_age_days
+        ),
+    )
 
 
 # ------------------------------------------------------------ Заглушки PTB
@@ -212,10 +246,11 @@ class TestSmokeCore:
 
     # ------------------------------------------------------------- сценарий
 
-    def test_tc_smoke_001_end_to_end_scenario(self, db_path, conn):
+    def test_tc_smoke_001_end_to_end_scenario(self, db_path, conn, frozen_now):
         """TC-SMOKE-001: /start → «😴 Заснул» → «🕐 Сейчас» → «☀️
         Проснулся» → вручную «вчера 22:30» (§7.14, is_backfilled=1) →
-        «↩️ Отменить последнее»; меню и БД на каждом шаге (PLAN п.3)."""
+        «↩️ Отменить последнее»; меню и БД на каждом шаге (PLAN п.3).
+        Время зафиксировано: 9:00 UTC = 12:00 МСК 10.10."""
         user_data: dict = {}  # ОДИН user_data на весь сценарий (реальный PTB)
 
         # 1. /start → §7.1, меню с «😴 Заснул» (FR-5, FR-6).
@@ -248,7 +283,10 @@ class TestSmokeCore:
         )
         assert SleepEventsRepo(conn).list_by_user(user["id"]) == []
 
-        # 3. «🕐 Сейчас» → §7.5, меню переключилось на «☀️ Проснулся» (FR-7)
+        # 3. «🕐 Сейчас» → §7.5 с фактом дня, меню переключилось на
+        #    «☀️ Проснулся» (FR-7 в ред. волны 6, PB-3): пустой день —
+        #    только «Бодрствование общее: 24 ч»; «Крайнее пробуждение»
+        #    НЕ выводится (решение продакта 29.10)
         now_update, _ = self._press(
             db_path, CALLBACK_TIME_NOW, user_data
         )
@@ -257,19 +295,21 @@ class TestSmokeCore:
         assert BTN_SLEEP not in _button_texts(events_menu)
         assert len(now_update.effective_message.replies) == 1
         answer_75 = now_update.effective_message.replies[0]
-        assert re.fullmatch(
-            r"✅ Засыпание записано в \d{2}:\d{2}\.\nСон идёт\. Крайнее "
-            r"пробуждение: \d{2}:\d{2}\.",
-            answer_75,
-        )
+        assert answer_75.splitlines() == [
+            "✅ Засыпание записано в 12:00.",
+            "Сон идёт.",
+            "Заснул: 12:00",
+            "Бодрствование общее: 24 ч",
+        ]
+        assert "Крайнее пробуждение" not in answer_75
 
         rows = SleepEventsRepo(conn).list_by_user(user["id"])
         assert [e["event_type"] for e in rows] == ["sleep"]
         assert rows[0]["is_backfilled"] is False  # «Сейчас», не задним числом
 
         # 4. «☀️ Проснулся» → §7.10 → «⏪ Ввести время вручную» → §7.11 →
-        #    «вчера 22:30» → §7.14 со сводкой, is_backfilled=1
-        #    (FR-15, FR-16, FR-19)
+        #    «вчера 22:30» → §7.14 с фактами дня страницы «вчера»
+        #    (FR-15, FR-16, FR-19 в ред. волны 6 / PB-3)
         wake_update, _ = self._press(db_path, CALLBACK_WAKE, user_data)
         assert wake_update.callback_query.message.text == texts.BACKFILL_CHOOSE_TIME
 
@@ -284,9 +324,13 @@ class TestSmokeCore:
         text_update, _ = self._send_text(db_path, "вчера 22:30", user_data)
         assert len(text_update.effective_message.replies) == 1
         answer_714 = text_update.effective_message.replies[0]
-        assert re.match(r"✅ Событие записано на \d{2}:\d{2}\.", answer_714)
+        assert answer_714.startswith("✅ Событие записано на 22:30.")
         assert "Обновлённая сводка за день:" in answer_714
-        assert "Сон:" in answer_714 and "Бодрствование:" in answer_714
+        # Формат продакта (PB-3): события дня + «Бодрствование общее»;
+        # абстрактных сумм «Сон: …»/«Бодрствование: …» и окон нет.
+        assert "Бодрствование общее: " in answer_714
+        assert "Сон:" not in answer_714
+        assert "Бодрствование:" not in answer_714
         assert "Окно" not in answer_714  # окна — Пакет 2 (решение ОВ-ПО-2)
         # Диалог завершён — фазы сняты (design D10)
         assert events.WAIT_EVENT_TIME_KEY not in user_data

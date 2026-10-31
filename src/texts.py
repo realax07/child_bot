@@ -207,3 +207,20 @@ def backfill_success_text(local_hhmm: str, summary_lines: Iterable[str]) -> str:
 
 # §7.15 Ввод задним числом — слишком давно
 BACKFILL_TOO_OLD = "Нельзя вводить события старше 3 дней."
+
+# Подтверждение отмены последней отметки (FR-21 в ред. волны 6, PB-4,
+# задача 6.2) — служебный текст вне ТЗ §7. Сборку сообщения выполняет
+# handlers.undo (undo_done_text): метка вида — KIND_LABELS, мини-состояние
+# — формат фактов PB-3 (строки calculation.day_facts_lines / сводка
+# day_summary_lines); никаких новых абстрактных сумм.
+UNDO_LEFTOVER_EMPTY = "Сегодня записей пока нет."
+
+
+def undo_done_text(label: str, local_hhmm: str, leftover: str) -> str:
+    """Подтверждение отмены с мини-состоянием дневника (PB-4, задача 6.2).
+
+    «Отменено: Заснул 13:30» — ЧТО удалено (вид + локальное время записи,
+    прочитанные ДО delete); ниже — что осталось: «Записей за сегодня: N» +
+    факты дня (PB-3) либо строка пустого дня UNDO_LEFTOVER_EMPTY.
+    """
+    return f"Отменено: {label} {local_hhmm}.\n\n{leftover}"

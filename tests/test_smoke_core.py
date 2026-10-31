@@ -74,11 +74,13 @@ def frozen_now(monkeypatch):
     """Фиксировать «сейчас» для сценария (правило волны 6).
 
     events.datetime — замороженный класс («Сейчас» и расчётный момент
-    сводки); backfill.parse_time_input — обёртка с фиксированным
+    сводки); undo.datetime — тот же класс («сейчас» мини-состояния после
+    отмены, PB-4); backfill.parse_time_input — обёртка с фиксированным
     моментом ввода (класс backfill.datetime НЕ подменяется: хендлер
     проверяет isinstance(parsed, datetime)).
     """
     monkeypatch.setattr(events, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(undo, "datetime", _FrozenDatetime)
     real_parse = backfill.parse_time_input
     monkeypatch.setattr(
         backfill,
@@ -345,10 +347,18 @@ class TestSmokeCore:
 
         # 5. «↩️ Отменить последнее» → удалено ПОСЛЕДНЕЕ событие (wake
         #    задним числом), меню вернулось по актуальному состоянию
-        #    «спит» (design D12, FR-21)
+        #    «спит» (design D12, FR-21); подтверждение PB-4: ЧТО удалено
+        #    («Отменено: Проснулся 22:30» — wake «вчера 22:30» МСК) +
+        #    мини-состояние за сегодня (остался sleep 12:00 МСК — факты
+        #    дня PB-3, те же строки, что на шаге 3)
         undo_update, _ = self._press(db_path, CALLBACK_UNDO, user_data)
         assert undo_update.callback_query.answers == [None]
-        assert undo_update.effective_message.replies == [undo.UNDO_DONE]
+        assert undo_update.effective_message.replies == [
+            "Отменено: Проснулся 22:30.\n\n"
+            "Записей за сегодня: 1.\n"
+            "Заснул: 12:00\n"
+            "Бодрствование общее: 24 ч"
+        ]
         rows = SleepEventsRepo(conn).list_by_user(user["id"])
         assert [e["event_type"] for e in rows] == ["sleep"]  # wake удалён
         restored_menu = undo_update.callback_query.message.reply_markup

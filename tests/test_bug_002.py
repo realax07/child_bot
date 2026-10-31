@@ -199,8 +199,10 @@ def test_tc_bug002_005_sleep_button_when_awake_starts_7_10_dialog(db_path, conn)
 
 def test_tc_bug002_006_undo_button_deletes_last_and_sends_fresh_menu(db_path, conn):
     """TC-BUG002-006: «↩️ Отменить последнее» с панели — та же логика
-    undo:last: последняя запись удалена, подтверждение UNDO_DONE +
-    свежее inline-меню по состоянию ПОСЛЕ удаления (awake → «😴 Заснул»)."""
+    undo:last: последняя запись удалена, подтверждение «Отменено: …»
+    (PB-4: ЧТО удалено + мини-состояние; без «живого» ЧЧ:ММ — правило
+    волны 6) + свежее inline-меню по состоянию ПОСЛЕ удаления (awake →
+    «😴 Заснул»)."""
     user = get_user(conn, 4205)
     _insert_sleep(conn, user["id"])
     assert len(_events(conn, user["id"])) == 1
@@ -208,7 +210,10 @@ def test_tc_bug002_006_undo_button_deletes_last_and_sends_fresh_menu(db_path, co
     update, _context = _press(db_path, BTN_UNDO, telegram_id=4205)
 
     assert len(update.effective_message.replies) == 2
-    assert update.effective_message.replies[0] == undo.UNDO_DONE
+    # PB-4: подтверждение начинается с «Отменено: Заснул» (локальное
+    # время записи — реальное «5 минут назад», поэтому без фиксации
+    # ЧЧ:ММ в ассерте).
+    assert update.effective_message.replies[0].startswith("Отменено: Заснул ")
     assert _events(conn, user["id"]) == []
     menu = update.effective_message.markups[1]
     menu_texts = [btn.text for row in menu.inline_keyboard for btn in row]

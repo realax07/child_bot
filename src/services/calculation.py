@@ -13,7 +13,7 @@
 в ред. волны 6; решение продакта 29.10; design D7, D8.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
@@ -347,6 +347,76 @@ def daily_summary(
     )
 
 
+def _page_rise(
+    merged: list[SleepInterval],
+    unclosed: SleepInterval | None,
+    page_date: date,
+    window_start: datetime,
+    window_end: datetime,
+    bedtime_from: time,
+    rise_until: time,
+) -> datetime | None:
+    """Факт «Подъем» страницы дня по правилам PB-3 (review-001/002).
+
+    Единая точка правила для `day_facts_lines` (PB-3) и расчёта окон
+    (design D16, задача 1.1 add-recommendations) — «Подъем» окон = факт
+    «Подъем» страницы, дублирование арифметики запрещено (D16).
+
+    Подъем: конец ПОСЛЕДНЕГО ЗАВЕРШЁННОГО ночного отрезка, окончившегося
+    в окне страницы до rise_until локального (ночь могла начаться ещё
+    вечером предыдущего дня). Кандидат — только отрезок, после которого
+    ТА ЖЕ ночь не продолжается: нет более позднего ночного отрезка,
+    начавшегося в пределах НОЧНОГО ОКНА этого конца — от вечернего
+    отбоя (bedtime_from) предыдущих суток до утренней границы
+    (rise_until) суток конца (конец кандидата всегда в утренней
+    половине: time < rise_until). Промежуточные ночные пробуждения
+    одной ночи подавляют кандидата (ребенок «в ночи», minor-1
+    review-001-6.1), а отрезки ЧУЖИХ ночей/страниц — ранний утренний
+    сон следующего дня, ночные отрезки любых других дат — не подавляют
+    и не подменяют: сравнение по ПОЛНОМУ datetime с привязкой к дате
+    конца кандидата, а не по time-of-day (major-1 review-002-6.1).
+
+    Returns:
+        момент конца подъёма (naive datetime) или None — факта нет.
+    """
+
+    def closed(interval: SleepInterval) -> bool:
+        return interval is not unclosed
+
+    night_sorted = [
+        interval
+        for interval in merged
+        if classify_sleep(interval.start_local, interval.end_local).is_night
+    ]
+    rise_candidates = []
+    for idx, interval in enumerate(night_sorted):
+        if not (
+            closed(interval)
+            and window_start < interval.end_local <= window_end
+            and interval.end_local.time() < rise_until
+        ):
+            continue
+        night_from = datetime.combine(
+            interval.end_local.date() - timedelta(days=1), bedtime_from
+        )
+        night_to = datetime.combine(interval.end_local.date(), rise_until)
+        night_continues = any(
+            night_from <= later.start_local <= night_to
+            for later in night_sorted[idx + 1 :]
+        )
+        if not night_continues:
+            rise_candidates.append(interval)
+    if not rise_candidates:
+        return None
+    # Приоритет — подъём утра самой страницы (конец в дату страницы):
+    # ранний утренний сон СЛЕДУЮЩИХ суток, оканчивающийся до day_start
+    # и потому попавший в окно страницы по D8, не подменяет её
+    # «Подъем» (major-1 review-002-6.1, контр-кейс C5/N1).
+    page_morning = [i for i in rise_candidates if i.end_local.date() == page_date]
+    chosen = page_morning or rise_candidates
+    return chosen[-1].end_local
+
+
 def day_facts_lines(
     events: Iterable[tuple[str, datetime]],
     page_date: date,
@@ -459,52 +529,18 @@ def day_facts_lines(
 
     lines: list[str] = []
 
-    # Подъем: конец последнего завершённого ночного отрезка, окончившегося
-    # в окне страницы до rise_until локального (ночь могла начаться ещё
-    # вечером предыдущего дня). Кандидат — только отрезок, после которого
-    # ТА ЖЕ ночь не продолжается: нет более позднего ночного отрезка,
-    # начавшегося в пределах НОЧНОГО ОКНА этого конца — от вечернего
-    # отбоя (bedtime_from) предыдущих суток до утренней границы
-    # (rise_until) суток конца (конец кандидата всегда в утренней
-    # половине: time < rise_until). Промежуточные ночные пробуждения
-    # одной ночи подавляют кандидата (ребенок «в ночи», minor-1
-    # review-001-6.1), а отрезки ЧУЖИХ ночей/страниц — ранний утренний
-    # сон следующего дня, ночные отрезки любых других дат — не подавляют
-    # и не подменяют: сравнение по ПОЛНОМУ datetime с привязкой к дате
-    # конца кандидата, а не по time-of-day (major-1 review-002-6.1).
-    night_sorted = [
-        interval
-        for interval in merged
-        if classify_sleep(interval.start_local, interval.end_local).is_night
-    ]
-    rise_candidates = []
-    for idx, interval in enumerate(night_sorted):
-        if not (
-            closed(interval)
-            and window_start < interval.end_local <= window_end
-            and interval.end_local.time() < rise_until
-        ):
-            continue
-        night_from = datetime.combine(
-            interval.end_local.date() - timedelta(days=1), bedtime_from
-        )
-        night_to = datetime.combine(interval.end_local.date(), rise_until)
-        night_continues = any(
-            night_from <= later.start_local <= night_to
-            for later in night_sorted[idx + 1 :]
-        )
-        if not night_continues:
-            rise_candidates.append(interval)
-    if rise_candidates:
-        # Приоритет — подъём утра самой страницы (конец в дату страницы):
-        # ранний утренний сон СЛЕДУЮЩИХ суток, оканчивающийся до day_start
-        # и потому попавший в окно страницы по D8, не подменяет её
-        # «Подъем» (major-1 review-002-6.1, контр-кейс C5/N1).
-        page_morning = [
-            i for i in rise_candidates if i.end_local.date() == page_date
-        ]
-        chosen = page_morning or rise_candidates
-        rise_end = chosen[-1].end_local
+    # Подъем: единое правило PB-3 — `_page_rise` (та же функция, что и
+    # в расчёте окон, design D16; без дублей правила).
+    rise_end = _page_rise(
+        merged,
+        unclosed,
+        page_date,
+        window_start,
+        window_end,
+        bedtime_from,
+        rise_until,
+    )
+    if rise_end is not None:
         lines.append(f"{texts.FACT_RISE}: {rise_end:%H:%M}")
 
     for interval in day_in_page:
@@ -559,3 +595,242 @@ def day_facts_lines(
         total_wake = timedelta(0)
     lines.append(f"{texts.FACT_TOTAL_WAKE}: {texts.format_duration(total_wake)}")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Окна дневного сна (add-recommendations, задача 1.1; design D16;
+# ТЗ §4.5 задача 1, §3.1, §3.6; FR-26, FR-27, FR-28, FR-35).
+#
+# Чистые функции: вход — сырые пары (event_type, timestamp) naive в TZ
+# пользователя + настройки (dict, родные типы как в SettingsService.get_all)
+# + момент расчёта; БД не касается. Якоря — из переданных настроек
+# (design D14: смена настройки меняет окна без релиза); дефолты —
+# аргументные дефолты функций ниже (значения ТЗ §5 = DEFAULT_KEYS
+# пакета 1; прямой импорт DEFAULT_KEYS в calculation запрещён —
+# чистота модуля без sqlite3, guard TC-SUM-001; соответствие дефолтов
+# DEFAULT_KEYS фиксирует тест TC-REC-008).
+# ---------------------------------------------------------------------------
+
+
+def _setting_value(
+    settings: Mapping[str, int | float | str] | None,
+    key: str,
+    default: int | float | str | time,
+) -> int | float | str | time:
+    """Значение настройки из переданного dict; нет ключа — дефолт (FR-24)."""
+    if settings is None:
+        return default
+    value = settings.get(key)
+    return default if value is None else value
+
+
+def _as_minutes(value: int | float | str | time) -> int:
+    """Настройка-длительность в минутах (значения int в DEFAULT_KEYS)."""
+    return int(value)  # type: ignore[arg-type]
+
+
+def _as_hhmm(value: int | float | str | time) -> time:
+    """Настройка «ЧЧ:ММ» (str в DEFAULT_KEYS) или уже time → time."""
+    if isinstance(value, time):
+        return value
+    hours_s, minutes_s = str(value).split(":")
+    return time(int(hours_s), int(minutes_s))
+
+
+@dataclass(frozen=True)
+class NapWindow:
+    """Окно дневного сна с отклонениями эталона (FR-26…FR-28; D16).
+
+    Attributes:
+        rise: факт «Подъем» страницы дня (PB-3, `_page_rise`) — база окна.
+        start: начало окна = подъём + минимум бодрствования
+            (настройка sleep_min_before_nap, дефолт 5 ч 20 мин).
+        end: конец окна = подъём + максимум бодрствования
+            (настройка sleep_max_before_nap, дефолт 6 ч).
+        wake_deadline: крайнее пробуждение от дневного сна (настройка
+            wake_deadline, дефолт 15:30) в дату подъёма.
+        forecast_end: прогноз конца сна при начале В НАЧАЛЕ окна —
+            start + target_nap_duration (настройка, дефолт 90 мин).
+            Для произвольного начала сна — `nap_end_forecast` (FR-35).
+        after_deadline: True — прогноз конца при начале в начале окна
+            ПОЗЖЕ wake_deadline (поздний подъём §3.6 — предупреждение
+            «будить не позже 15:30» / §7.8 с цифрами).
+        stretch_to_limit: True — ранний подъём §3.6: всё окно
+            укладывается в лимит растяжения (stretch_limit, дефолт
+            13:00) — совет «тянем бодрствование до конца окна».
+    """
+
+    rise: datetime
+    start: datetime
+    end: datetime
+    wake_deadline: datetime
+    forecast_end: datetime
+    after_deadline: bool
+    stretch_to_limit: bool
+
+
+def nap_end_forecast(
+    nap_start_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    target_nap_duration_min: int = 90,
+) -> datetime:
+    """Прогноз конца дневного сна при начале nap_start_local (FR-35).
+
+    База прогноза — настройка target_nap_duration (дефолт 90 мин,
+    решение №1 от 26.10); прогноз уточняется при следующем событии
+    (допущение design.md). Чистая функция, naive в TZ пользователя.
+
+    Args:
+        nap_start_local: фактическое/планируемое начало сна, naive.
+        settings: настройки пользователя (dict) или None — дефолты.
+        target_nap_duration_min: дефолт цели дневного сна, мин.
+
+    Returns:
+        прогноз момента пробуждения, naive datetime.
+    """
+    raw = _setting_value(settings, "target_nap_duration", target_nap_duration_min)
+    return nap_start_local + timedelta(minutes=_as_minutes(raw))
+
+
+def nap_end_after_deadline(
+    nap_start_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    target_nap_duration_min: int = 90,
+    wake_deadline: time = time(15, 30),
+) -> bool:
+    """Проверка прогноза конца сна против крайнего пробуждения (FR-35).
+
+    True — прогноз (начало + target_nap_duration) СТРОГО позже
+    wake_deadline (настройка, дефолт 15:30); ровно в 15:30 — ещё нет
+    («позже 15:30», ТЗ §7.8). Чистая функция, БД не касается.
+    """
+    deadline_dt = datetime.combine(nap_start_local.date(), _as_hhmm(
+        _setting_value(settings, "wake_deadline", wake_deadline)
+    ))
+    return nap_end_forecast(
+        nap_start_local, settings, target_nap_duration_min=target_nap_duration_min,
+    ) > deadline_dt
+
+
+def nap_window(
+    events: Iterable[tuple[str, datetime]],
+    now_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    day_start: time = DEFAULT_DAY_START,
+    merge_threshold_min: int = 20,
+    bedtime_from: time = time(19, 0),
+    rise_until: time = time(12, 0),
+    stretch_limit: time = time(13, 0),
+    sleep_min_before_nap_min: int = 320,
+    sleep_max_before_nap_min: int = 360,
+    target_nap_duration_min: int = 90,
+    wake_deadline: time = time(15, 30),
+) -> NapWindow | None:
+    """Окно дневного сна от фактического подъёма страницы (FR-26…FR-28;
+    ТЗ §4.5 задача 1, §3.1, §3.6; design D16, задача 1.1).
+
+    Окно = [подъём + минимум бодрствования; подъём + максимум
+    бодрствования] (§3.1: 5 ч 20 мин … 6 ч 00 мин). Подъём — факт
+    «Подъем» страницы дня по правилам PB-3 (`_page_rise`, design D16:
+    переиспользование, без дублей правила). Подстройка по отклонениям
+    эталона §3.6 — флагами, детерминированно:
+      - stretch_to_limit (ранний подъём, напр. 07:00 → 12:20–13:00):
+        конец окна не позже лимита 13:00 — совет «тянем бодрствование
+        до конца окна» (A6; тексты §7.3 — волна 2.3);
+      - after_deadline (поздний подъём, напр. 09:00 → 14:20–15:00):
+        прогноз конца при начале в начале окна позже 15:30 — граница
+        «будить не позже 15:30» (A2/A7; тексты §7.4/§7.8 — волна 2.3).
+
+    Окно считается ОТ ПОДЪЁМА, не от момента запроса: расчёт в любой
+    момент дня даёт то же окно (FR-26, сценарий «Окно после дневного
+    события»). Факта «Подъем» нет — None (неполные данные, FR-34:
+    окна от ненастоящего подъёма не строим). Чистая функция: БД не
+    касается, событий не создаёт.
+
+    Args:
+        events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
+            naive datetime в TZ пользователя, любой порядок.
+        now_local: момент расчёта (определяет страницу дня и закрывает
+            незакрытый sleep), naive datetime в TZ пользователя.
+        settings: настройки пользователя (dict, родные типы как в
+            SettingsService.get_all) или None — дефолты ТЗ §5.
+        day_start: граница страницы дня (настройка day_start, дефолт
+            06:00).
+        merge_threshold_min: порог склейки (настройка merge_threshold,
+            дефолт 20 мин, design D9).
+        bedtime_from: вечерняя граница факта «Отбой» (из night_bounds,
+            дефолт 19:00).
+        rise_until: утренняя граница факта «Подъем» (дефолт 12:00).
+        stretch_limit: лимит растяжения первого бодрствования при
+            раннем подъёме (ТЗ §3.6 A6 «тянем до 13:00»).
+        sleep_min_before_nap_min: дефолт минимума бодрствования, мин
+            (настройка sleep_min_before_nap — 5 ч 20 мин).
+        sleep_max_before_nap_min: дефолт максимума бодрствования, мин
+            (настройка sleep_max_before_nap — 6 ч 00 мин).
+        target_nap_duration_min: дефолт цели дневного сна, мин
+            (настройка target_nap_duration — решение №1).
+        wake_deadline: дефолт крайнего пробуждения (настройка
+            wake_deadline — 15:30).
+
+    Returns:
+        NapWindow с флагами отклонений §3.6 или None, если подъёма
+        в странице дня нет.
+    """
+    day_start = _as_hhmm(_setting_value(settings, "day_start", day_start))
+    page_date = day_page_of(now_local, day_start)
+    merged = merge_intervals(
+        build_sleep_intervals(events, now_local=now_local, day_start=day_start),
+        _as_minutes(_setting_value(settings, "merge_threshold", merge_threshold_min)),
+    )
+    # Незакрытый sleep (та же логика, что day_facts_lines): последняя
+    # запись — sleep без парного wake; его конец — не факт подъёма.
+    unclosed: SleepInterval | None = None
+    if merged and sorted(events, key=lambda item: item[1])[-1][0] == "sleep":
+        unclosed = merged[-1]
+    # Вечерняя граница «Отбоя» — из night_bounds «ЧЧ:ММ-ЧЧ:ММ» (начало).
+    raw_bounds = _setting_value(settings, "night_bounds", bedtime_from)
+    if isinstance(raw_bounds, str) and "-" in raw_bounds:
+        bedtime = _as_hhmm(raw_bounds.split("-")[0])
+    else:
+        bedtime = _as_hhmm(raw_bounds)
+    rise = _page_rise(
+        merged,
+        unclosed,
+        page_date,
+        datetime.combine(page_date, day_start),
+        _day_page_end(page_date, day_start),
+        bedtime,
+        rise_until,
+    )
+    if rise is None:
+        return None
+
+    min_wake = timedelta(minutes=_as_minutes(
+        _setting_value(settings, "sleep_min_before_nap", sleep_min_before_nap_min)
+    ))
+    max_wake = timedelta(minutes=_as_minutes(
+        _setting_value(settings, "sleep_max_before_nap", sleep_max_before_nap_min)
+    ))
+    window_start = rise + min_wake
+    window_end = rise + max_wake
+    deadline_time = _as_hhmm(_setting_value(settings, "wake_deadline", wake_deadline))
+    deadline_dt = datetime.combine(rise.date(), deadline_time)
+    target_min = _as_minutes(
+        _setting_value(settings, "target_nap_duration", target_nap_duration_min)
+    )
+
+    return NapWindow(
+        rise=rise,
+        start=window_start,
+        end=window_end,
+        wake_deadline=deadline_dt,
+        # Прогноз конца при начале в НАЧАЛЕ окна; для фактического
+        # начала сна — nap_end_forecast/nap_end_after_deadline (FR-35).
+        forecast_end=window_start + timedelta(minutes=target_min),
+        after_deadline=window_start + timedelta(minutes=target_min) > deadline_dt,
+        # Ранний подъём §3.6 (A6): всё окно не позже лимита 13:00.
+        stretch_to_limit=window_end <= datetime.combine(rise.date(), stretch_limit),
+    )

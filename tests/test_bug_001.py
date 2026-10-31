@@ -114,8 +114,9 @@ def _send_text(db_path, text: str, kind: str, telegram_id: int):
 def test_tc_bug001_001_wake_closes_open_sleep_no_conflict(db_path, conn):
     """TC-BUG001-001 (BUG-001, сценарий Марии): sleep записан задним
     числом → ввод wake задним числом ПОЗЖЕ начала сна → §7.13 НЕТ,
-    ОБА события в БД (wake с is_backfilled=1), сводка §7.14 считает
-    сон (НЕ «Сон: 0 мин. Бодрствование: 24 ч»)."""
+    ОБА события в БД (wake с is_backfilled=1), сводка §7.14 в формате
+    фактов продакта PB-3 (старого суммарного «Сон: …» нет; симптом
+    BUG-001 — «Сон: 0 мин», «24 ч» — не воспроизводится)."""
     user = get_user(conn, 4101)
     sleep_at = _past_local(2)
     _insert_event(conn, user["id"], "sleep", sleep_at)
@@ -130,7 +131,17 @@ def test_tc_bug001_001_wake_closes_open_sleep_no_conflict(db_path, conn):
     assert len(update.effective_message.replies) == 1
     reply = update.effective_message.replies[0]
     assert "конфликтует" not in reply
-    assert "Сон: " in reply
+    # Сводка §7.14 — факты продакта (PB-3): закрытая пара sleep+wake
+    # видна строками «Заснул:/Проснулся:» (дневной интервал) либо
+    # «Отбой:/Ночной сон:» (ночной, классификация зависит от времени
+    # суток); суммарное бодрствование всегда выводится. Старого
+    # формата «Сон: …» быть не должно.
+    assert "Бодрствование общее: " in reply
+    assert (
+        "Заснул: " in reply
+        and "Проснулся: " in reply
+    ) or "Ночной сон: " in reply
+    assert "Сон: " not in reply
     # Симптом BUG-001 не воспроизводится: сон не обнулён, бодрствование
     # не растянуто на сутки.
     assert "Сон: 0 мин" not in reply

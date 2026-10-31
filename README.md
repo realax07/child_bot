@@ -40,3 +40,14 @@ bash scripts/backup_db.sh /путь/до/child_bot.db   # sqlite3 .backup, ло�
 - ТЗ: ТЗ_Дневник_сна_ребёнка.md
 - План пакета 1: PLAN-add-core-diary.md
 - Требования и задачи: openspec/changes/add-core-diary/
+
+## Состояние
+
+- Пакет 1 принят; активный change — `add-core-diary` (этап 2: подсказки окон,
+  напоминания APScheduler, редактор настроек — в бэклоге).
+- Тесты: 193 (e2e smoke 4 + handler 81 + unit 91 + приемка), CI зелен.
+- Скиллы: зеркало фабрики — `skills/` (9 групп после перегруппировки 2026-10-31).
+- Архив: `archive/plans/` — планы закрытых багфиксов; `openspec/changes/archive/` —
+  завершенные change-пакеты.
+- Живучесть: user-crontab гард `* * * * *` поднимает процесс за ≤60с при любом
+  падении; лог `/home/openclaw/child_bot-data/bot.log`.

@@ -369,6 +369,8 @@ def day_facts_lines(
     day_start: time = DEFAULT_DAY_START,
     now_local: datetime | None = None,
     merge_threshold_min: int = 20,
+    bedtime_from: time = time(19, 0),
+    rise_until: time = time(12, 0),
 ) -> list[str]:
     """Строки фактов дня для подтверждений (PB-3, волна 6; FR-7/FR-8/FR-19
     в ред. волны 6; решение продакта 29.10).
@@ -380,16 +382,21 @@ def day_facts_lines(
     по хендлерам.
 
     Правила вывода (строка только при наличии факта):
-      - «Подъем: HH:MM» — конец первого ЗАВЕРШЁННОГО ночного отрезка,
-        окончившегося в окне страницы (подъём утра этой страницы; ночной
-        сон мог начаться вечером предыдущего дня);
+      - «Подъем: HH:MM» — конец ПОСЛЕДНЕГО ЗАВЕРШЁННОГО ночного отрезка,
+        окончившегося в окне страницы до 12:00 локального, после которого
+        ночь не продолжается более поздним ночным отрезком (подъём утра
+        этой страницы; ночной сон мог начаться вечером предыдущего дня;
+        промежуточные ночные отрезки — короткие пробуждения внутри ночи —
+        «Подъем» не создают);
       - «Заснул: HH:MM» / «Проснулся: HH:MM» — дневные отрезки (D7),
         начавшиеся в окне страницы, после склейки (D9); незакрытый
         отрезок — только «Заснул»;
       - «Дневной сон: H ч M мин» — суммарно по завершённым дневным
         отрезкам страницы (строка только если такой был);
-      - «Отбой: HH:MM» — начало последнего ночного отрезка страницы
-        (уход в ночь);
+      - «Отбой: HH:MM» — начало ПЕРВОГО ночного отрезка страницы,
+        начавшегося в вечернем окне (не раньше 19:00 локального дня
+        страницы, уход в ночь); ночные отрезки с началом раньше
+        (утренние/дневные эпизоды) «Отбой» не создают;
       - «Ночной сон: H ч M мин» — суммарно по завершённым ночным
         отрезкам страницы (строка только если такой был);
       - «Бодрствование общее: H ч M мин» — окно страницы (day_start →
@@ -413,6 +420,12 @@ def day_facts_lines(
             naive datetime в TZ пользователя или None.
         merge_threshold_min: порог склейки в минутах (из settings,
             FR-24).
+        bedtime_from: граница вечернего окна факта «Отбой» — «Отбой»
+            только у ночного отрезка, начавшегося не раньше (minor-1
+            review-001-6.1).
+        rise_until: граница утреннего окна факта «Подъем» — «Подъем»
+            только у ночного отрезка, окончившегося до этого момента
+            локального времени (minor-1 review-001-6.1).
 
     Returns:
         list[str] — строки фактов в порядке продакта; для пустого дня —
@@ -448,16 +461,33 @@ def day_facts_lines(
 
     lines: list[str] = []
 
-    # Подъем: конец первого завершённого ночного отрезка, окончившегося
-    # в окне страницы (ночь могла начаться ещё вечером предыдущего дня).
-    for interval in merged:
-        if (
-            classify_sleep(interval.start_local, interval.end_local).is_night
-            and closed(interval)
+    # Подъем: конец последнего завершённого ночного отрезка, окончившегося
+    # в окне страницы до rise_until локального (ночь могла начаться ещё
+    # вечером предыдущего дня). Кандидат — только отрезок, после которого
+    # ночь НЕ продолжается: нет более позднего ночного отрезка,
+    # начинающегося до rise_until (иначе конец — промежуточное ночное
+    # пробуждение, ребенок «в ночи»; minor-1 review-001-6.1).
+    night_sorted = [
+        interval
+        for interval in merged
+        if classify_sleep(interval.start_local, interval.end_local).is_night
+    ]
+    rise_candidates = []
+    for idx, interval in enumerate(night_sorted):
+        if not (
+            closed(interval)
             and window_start < interval.end_local <= window_end
+            and interval.end_local.time() < rise_until
         ):
-            lines.append(f"{texts.FACT_RISE}: {interval.end_local:%H:%M}")
-            break
+            continue
+        night_continues = any(
+            later.start_local.time() < rise_until
+            for later in night_sorted[idx + 1 :]
+        )
+        if not night_continues:
+            rise_candidates.append(interval)
+    if rise_candidates:
+        lines.append(f"{texts.FACT_RISE}: {rise_candidates[-1].end_local:%H:%M}")
 
     for interval in day_in_page:
         lines.append(f"{texts.FACT_FELL_ASLEEP}: {interval.start_local:%H:%M}")
@@ -470,7 +500,15 @@ def day_facts_lines(
         lines.append(f"{texts.FACT_DAY_SLEEP}: {texts.format_duration(total)}")
 
     if night_in_page:
-        lines.append(f"{texts.FACT_BEDTIME}: {night_in_page[-1].start_local:%H:%M}")
+        bedtime_candidates = [
+            interval
+            for interval in night_in_page
+            if interval.start_local.time() >= bedtime_from
+        ]
+        if bedtime_candidates:
+            lines.append(
+                f"{texts.FACT_BEDTIME}: {bedtime_candidates[0].start_local:%H:%M}"
+            )
 
     closed_night = [i for i in night_in_page if closed(i)]
     if closed_night:

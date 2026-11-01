@@ -39,7 +39,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, time, timezone
-from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -61,7 +60,7 @@ from src.services.calculation import (
     night_window,
 )
 from src.services.event import create_event, get_user, list_raw_events
-from src.services.settings import SettingsService
+from src.services.settings import DEFAULT_KEYS, SettingsService
 from src.services.state import KIND_SLEEP, KIND_WAKE, is_stale_callback
 
 # callback_data кнопок §7.10 (design D2, ТЗ §10.3).
@@ -80,9 +79,6 @@ WAIT_EVENT_TIME_KEY = "wait_event_time"
 # note 1: дубль литерала убран). Имя оставлено как алиас для обратной
 # совместимости импортов (handlers/backfill.py, тесты).
 OBSERVER_DENIED = texts.OBSERVER_DENIED
-
-# Fallback пояса — как в /start (design D4, аудитория бота).
-_FALLBACK_TZ = "Europe/Moscow"
 
 
 # -------------------------------------------------------------- Тексты FR-7/8
@@ -293,10 +289,10 @@ def _settings_hhmm(settings: dict, key: str) -> str:
 
     Ключ не задан (SettingsService.get_all отдаёт только DEFAULT_KEYS —
     seed при /start; расчёты без него берут аргументные дефолты) —
-    дефолт ТЗ §5: night_target 22:00, night_deadline 22:30.
+    дефолт ТЗ §5 из DEFAULT_KEYS (единый источник ключей, design D21;
+    техдолг пакета 2, п. 2.3 — локальный дубль дефолтов снят).
     """
-    defaults = {"night_target": "22:00", "night_deadline": "22:30"}
-    return str(settings.get(key, defaults[key]))
+    return str(settings.get(key, DEFAULT_KEYS[key]))
 
 
 # ------------------------------------------------------------- Помощники
@@ -328,13 +324,24 @@ def time_choose_markup() -> InlineKeyboardMarkup:
     )
 
 
-def _local_hhmm(utc_dt: datetime, tz_name: str | None) -> str:
-    """UTC-момент → «ЧЧ:ММ» в поясе пользователя (design D4)."""
-    try:
-        tz = ZoneInfo(tz_name) if tz_name else ZoneInfo(_FALLBACK_TZ)
-    except Exception:  # некорректное имя пояса в БД — аудитория бота
-        tz = ZoneInfo(_FALLBACK_TZ)
-    return utc_dt.astimezone(tz).strftime("%H:%M")
+def _local_hhmm(
+    utc_moment: str | datetime, tz_name: str | None
+) -> str:
+    """UTC-момент (строка БД «YYYY-MM-DD HH:MM:SS» или aware datetime) →
+    «ЧЧ:ММ» в поясе пользователя (design D4).
+
+    Единый хелпер handlers.events / handlers.undo (техдолг пакета 2,
+    п. 2.1): некорректное/пустое имя пояса — fallback Europe/Moscow
+    (resolve_tz — единственная точка нормализации пояса).
+    """
+    if isinstance(utc_moment, str):
+        utc_moment = datetime.strptime(
+            utc_moment, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+    local = utc_moment.astimezone(resolve_tz(tz_name or "")).replace(
+        tzinfo=None
+    )
+    return f"{local:%H:%M}"
 
 
 def _pending_kind(context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -547,17 +554,20 @@ async def time_choose_callback(
         # Сводка — ЕДИНАЯ точка сборки (PB-3): события и настройки читаются
         # ПОСЛЕ записи события — факт уже в списке (расчётный момент — now).
         summary_lines = day_summary_lines(conn, user, now_utc)
-        # Строка следующего сна — по типу пробуждения (BUG-005, FR-38/D20):
-        # утренний подъём → дневное окно; после дневного сна → конкретное
-        # время ухода; None — факта «Подъем» нет (окна/рекомендации от
-        # неполных данных не строим).
-        window_line = next_sleep_line(conn, user, now_utc)
         if kind == KIND_SLEEP:
             # §7.5: БЕЗ строки окна (design D20: показ окон в §7.5
-            # отклонён) и БЕЗ «Крайнего пробуждения» (решение 29.10).
+            # отклонён) и БЕЗ «Крайнего пробуждения» (решение 29.10);
+            # расчёт окна здесь и НЕ нужен (техдолг пакета 2, п. 2.3:
+            # лишний вызов next_sleep_line в §7.5-ветке снят — окно
+            # строится только для wake-ветки ниже).
             answer = fell_asleep_text(local_hhmm, summary_lines)
         else:
             # FR-8: подтверждающая строка + окно + сводка PB-3 без изменений.
+            # Строка следующего сна — по типу пробуждения (BUG-005,
+            # FR-38/D20): утренний подъём → дневное окно; после дневного
+            # сна → конкретное время ухода; None — факта «Подъем» нет
+            # (окна/рекомендации от неполных данных не строим).
+            window_line = next_sleep_line(conn, user, now_utc)
             answer = woke_up_text(local_hhmm, summary_lines, window_line)
         if update.effective_message is not None:
             await update.effective_message.reply_text(answer)

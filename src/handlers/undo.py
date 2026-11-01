@@ -30,19 +30,19 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from src import texts
 from src.handlers import common
-from src.handlers.events import day_summary_lines
+from src.handlers.events import _local_hhmm, _settings_day_start, day_summary_lines
 from src.repositories.sleep_events import SleepEventsRepo
 from src.services import access
 from src.services import scheduler as reminder_scheduler
 from src.services.backfill_parser import resolve_tz
-from src.services.calculation import DEFAULT_DAY_START, day_page_of
+from src.services.calculation import day_page_of
 from src.services.event import get_user, list_raw_events
 from src.services.settings import SettingsService
 
@@ -91,28 +91,9 @@ def undo_done_text(
     return texts.undo_done_text(label, local_hhmm, _leftover_state(conn, user))
 
 
-def _local_hhmm(utc_moment: str | datetime, tz_name: str | None) -> str:
-    """UTC-момент (строка БД «YYYY-MM-DD HH:MM:SS») → «ЧЧ:ММ» в поясе
-    пользователя (design D4) — как backfill._local_hhmm / события дня."""
-    if isinstance(utc_moment, str):
-        utc_moment = datetime.strptime(
-            utc_moment, "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-    local = utc_moment.astimezone(resolve_tz(tz_name or "")).replace(
-        tzinfo=None
-    )
-    return f"{local:%H:%M}"
-
-
-def _settings_day_start(raw: str) -> time:
-    """«ЧЧ:ММ» настройки day_start → time; фолбэк — дефолт расчётов (D8)
-    (тот же парсинг, что events._settings_day_start; строки сводки при
-    этом строит day_summary_lines — единая точка сборки, PB-3)."""
-    try:
-        hh, mm = raw.split(":")
-        return time(int(hh), int(mm))
-    except (AttributeError, ValueError):
-        return DEFAULT_DAY_START
+# _local_hhmm и _settings_day_start — единые хелперы handlers.events
+# (техдолг пакета 2, п. 2.1: дубли undo/events сведены; семантика та же —
+# строка БД или aware datetime → «ЧЧ:ММ» локально, day_start с фолбэком D8).
 
 
 def _leftover_state(conn: sqlite3.Connection, user: dict) -> str:

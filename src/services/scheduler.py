@@ -51,6 +51,7 @@ from apscheduler.triggers.date import DateTrigger
 from src import texts
 from src.db import init_db
 from src.repositories.sleep_events import SleepEventsRepo
+from src.repositories.users import UsersRepo
 from src.services.backfill_parser import resolve_tz
 from src.services.calculation import (
     _as_hhmm,
@@ -74,7 +75,6 @@ __all__ = [
     "PushPlan",
     "ReminderScheduler",
     "compute_push_plan",
-    "owner_users",
     "send_push_job",
     "notify_events_changed",
     "start_reminder_scheduler",
@@ -130,24 +130,6 @@ def _to_utc(local_naive: datetime, tz_name: str | None) -> datetime:
     return local_naive.replace(tzinfo=resolve_tz(tz_name or "")).astimezone(
         timezone.utc
     )
-
-
-def owner_users(conn: sqlite3.Connection) -> list[dict]:
-    """Владельцы дневника (users.role = 'parent') — получатели пушей (D19).
-
-    Read-only SQL: метода «список пользователей» в UsersRepo нет, а зона
-    задачи 3.1 не включает src/repositories (расширение репозитория —
-    вне этой задачи). Читаются только колонки по ТЗ §9.1; запись в users
-    отсюда не выполняется никогда.
-    """
-    rows = conn.execute(
-        "SELECT id, telegram_id, role, timezone FROM users "
-        "WHERE role = 'parent' ORDER BY id"
-    ).fetchall()
-    return [
-        {"id": r[0], "telegram_id": r[1], "role": r[2], "timezone": r[3]}
-        for r in rows
-    ]
 
 
 def compute_push_plan(
@@ -273,7 +255,9 @@ async def send_push_job(
     conn = init_db(db_path)
     try:
         user = next(
-            (u for u in owner_users(conn) if u["id"] == user_id), None
+            (u for u in UsersRepo(conn).list_all(role="parent")
+             if u["id"] == user_id),
+            None,
         )
         if user is None:
             return
@@ -344,7 +328,7 @@ class ReminderScheduler:
         conn = init_db(self._db_path)
         try:
             planned: dict[tuple[int, str], PushPlan] = {}
-            for user in owner_users(conn):
+            for user in UsersRepo(conn).list_all(role="parent"):
                 for item in compute_push_plan(conn, user, now_utc):
                     planned[(item.user_id, item.kind)] = item
         finally:

@@ -55,6 +55,33 @@ class UsersRepo:
         ).fetchone()
         return {"id": row[0], "telegram_id": row[1], "role": row[2], "timezone": row[3]}
 
+    def list_all(self, role: str | None = None) -> list[dict]:
+        """Список пользователей (ТЗ §9.1), порядок по id.
+
+        Read-only; запись отсюда не выполняется никогда. role — фильтр
+        по users.role (например 'parent' — владельцы дневника, получатели
+        пушей, design D19); None — все пользователи. Форма строк — та же,
+        что get_or_create: dict с id, telegram_id, role, timezone.
+
+        (Сведение техдолга пакета 2, п. 3.1: разовый read-only SQL
+        owner_users в scheduler.py перенесён в репозиторий — слой
+        services SQL не пишет, design D1.)
+        """
+        if role is None:
+            rows = self._conn.execute(
+                "SELECT id, telegram_id, role, timezone FROM users ORDER BY id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, telegram_id, role, timezone FROM users "
+                "WHERE role = ? ORDER BY id",
+                (role,),
+            ).fetchall()
+        return [
+            {"id": r[0], "telegram_id": r[1], "role": r[2], "timezone": r[3]}
+            for r in rows
+        ]
+
     def get_timezone(self, telegram_id: int) -> str | None:
         """Прочитать часовой пояс пользователя (FR-4) или None."""
         row = self._conn.execute(

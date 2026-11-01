@@ -17,14 +17,14 @@ design D13); FR-24: правка wake_deadline меняет окно следу�
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from src import texts
 from src.db import init_db
-from src.handlers import settings_screen
+from src.handlers import backfill, events, settings_screen
 from src.handlers.backfill import CONFIRM_OVERWRITE_KEY, backfill_time_message
 from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.handlers.settings_screen import (
@@ -697,4 +697,105 @@ def test_tc_sett_029_value_goes_to_setting_not_event(db_path):
     assert SettingsService(conn).get(user["id"], "wake_deadline") == "13:20"
     assert _event_count(conn) == 0  # событие сна НЕ создано
     assert len(_history_rows(conn, user["id"])) == 1  # правка настройки — одна
+    conn.close()
+
+
+# ---------------------- 1.2-sym: обратная симметрия (санкция ПМ на events.py)
+
+
+class _FrozenBackfillDatetime(datetime):
+    """datetime с замороженным now() — «сейчас» группы 0 фиксируется.
+
+    Фикс: 01.11.2026 15:00 UTC = 18:00 МСК → «13:20» (локальное сегодня)
+    для группы 0 — прошедшее время, разбирается в СОБЫТИЕ детерминированно.
+    Подменяется НЕ сам класс (обработчик backfill делает isinstance по
+    datetime — подмена класса ломает разбор), а точка now(): обёртка
+    parse_time_input в тесте ниже.
+    """
+
+    FIXED_NOW_UTC = datetime(2026, 11, 1, 15, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[override]
+        if tz is not None:
+            return cls.FIXED_NOW_UTC.astimezone(tz)
+        return cls.FIXED_NOW_UTC.replace(tzinfo=None)
+
+
+def _press_event(db_path, data: str, context, telegram_id: int = 4242):
+    """Провести нажатие event:*/time:* через реальные обработчики группы 0
+    (events.event_button_callback / events.time_choose_callback) на ОБЩЕМ
+    context — как в реальном боте, где фазы живут в одном user_data."""
+
+    class _EventQuery(_FakeCallbackQuery):
+        async def edit_message_text(self, text, reply_markup=None):
+            self.message.replies.append(text)
+            self.message.reply_markup = reply_markup
+
+    update = _FakeCallbackUpdate(telegram_id, data)
+    update.callback_query = _EventQuery(data)
+    update.effective_message = update.callback_query.message
+    handler = (
+        events.event_button_callback
+        if data.startswith("event:")
+        else events.time_choose_callback
+    )
+    asyncio.run(handler(update, context))  # type: ignore[arg-type]
+    return update, context
+
+
+def test_tc_sett_030_event_entry_clears_setting_phase(db_path, monkeypatch):
+    """TC-SETT-030 (1.2-sym): активная фаза настроек (WAIT_SETTING_VALUE)
+    → «🌙 Сон» → «⏪ Ввести время вручную» → ввод «13:20» идёт в СОБЫТИЕ
+    (группа 0); фаза настроек снята на ОБОИХ входах в backfill-фазы;
+    настройка и история НЕ тронуты.
+
+    Трассировка: остаточный конфликт review-001-1.2 (симметрия к
+    TC-SETT-027…029, санкция ПМ на events.py вне первичной зоны).
+    """
+    # «Сейчас» группы 0 фиксировано (см. _FrozenBackfillDatetime): сам
+    # класс datetime НЕ подменяем — isinstance(parsed, datetime) в
+    # backfill_time_message ломался бы; фиксируем точку now() обёрткой.
+    real_parse = backfill.parse_time_input
+    monkeypatch.setattr(
+        backfill,
+        "parse_time_input",
+        lambda text, tz, now, *, max_age_days: real_parse(
+            text, tz, _FrozenBackfillDatetime.FIXED_NOW_UTC, max_age_days=max_age_days
+        ),
+    )
+    conn = init_db(db_path)
+    user = get_user(conn, 4242)
+    SettingsService(conn).seed_defaults(user["id"])
+    context = _FakeContext(db_path)
+
+    # Вход в диалог правки настройки → фаза WAIT_SETTING_VALUE (группа 2).
+    _, context = _press(db_path, "settings:edit:wake_deadline", context=context)
+    assert context.user_data.get(WAIT_SETTING_VALUE) == "wake_deadline"
+
+    # «🌙 Сон»: постановка backfill-фазы (PENDING_KIND) снимает фазу настроек.
+    _, context = _press_event(db_path, "event:sleep", context=context)
+    assert context.user_data.get(PENDING_KIND_KEY) == KIND_SLEEP
+    assert WAIT_SETTING_VALUE not in context.user_data
+
+    # Интерливинг: пользователь успел открыть правку настройки между
+    # нажатиями — фаза настроек снова активна. «⏪ Ввести время вручную»:
+    # постановка WAIT_EVENT_TIME снимает её повторно (второе место).
+    context.user_data[WAIT_SETTING_VALUE] = "wake_deadline"
+    _, context = _press_event(db_path, "time:manual", context=context)
+    assert context.user_data.get(WAIT_EVENT_TIME_KEY) is True
+    assert WAIT_SETTING_VALUE not in context.user_data
+
+    # Ввод «13:20» принимаете ОБЕ группы; группа 0 разбирает его в событие,
+    # группе 2 фаза не оставлена — настройки молчат.
+    group0 = _type_time_backfill(db_path, context, "13:20")
+    assert len(group0.effective_message.replies) == 1
+    assert "Событие записано" in group0.effective_message.replies[0]
+    group2 = _type_value(db_path, context, "13:20")
+    assert group2.effective_message.replies == []  # фазы настроек нет — молча
+
+    # Событие создано группой 0; настройка и история НЕ тронуты.
+    assert _event_count(conn) == 1
+    assert SettingsService(conn).get(user["id"], "wake_deadline") == "15:30"
+    assert _history_rows(conn, user["id"]) == []
     conn.close()

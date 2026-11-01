@@ -366,6 +366,12 @@ def _set_pending_kind(context: ContextTypes.DEFAULT_TYPE, kind: str | None) -> N
             # note 1): зависшая фаза ожидания текста снята — иначе текст,
             # набранный до выбора time:manual, был бы принят незапрошенно.
             data.pop(WAIT_EVENT_TIME_KEY, None)
+            # Взаимное исключение фаз (1.2-sym, санкция ПМ): постановка
+            # backfill-фазы — начало НОВОЙ фазы, фаза диалога настроек
+            # снимается (зеркально к _clear_backfill_phases в
+            # settings_screen, 3de6685) — иначе текст события (например
+            # «13:20») дошёл бы и в группу 2 и обновил настройку.
+            _clear_setting_phase(context)
 
 
 def _set_wait_event_time(
@@ -381,6 +387,30 @@ def _set_wait_event_time(
     data = getattr(context, "user_data", None)
     if isinstance(data, dict) and active:
         data[WAIT_EVENT_TIME_KEY] = True
+        # Взаимное исключение фаз (1.2-sym, санкция ПМ): вход в «⏪ Ввести
+        # время вручную» гасит фазу настроек WAIT_SETTING_VALUE — зеркально
+        # к _clear_backfill_phases в settings_screen (3de6685), см.
+        # _clear_setting_phase.
+        _clear_setting_phase(context)
+
+
+def _clear_setting_phase(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Снять фазу настроек WAIT_SETTING_VALUE (группа 2).
+
+    Симметрия взаимного исключения фаз (major review-001-1.2, санкция ПМ
+    на events.py вне первичной зоны): PTB доставляет текст в ОБЕ группы,
+    поэтому одновременные фазы настроек (группа 2) и backfill-диалога
+    (группа 0) приводят к тому, что ввод времени события обновляет
+    настройку (или наоборот, см. 3de6685). Импорт константы — внутри
+    функции: settings_screen импортирует константы events на уровне
+    модуля, верхнеуровневый импорт дал бы цикл; строковых копий нет
+    (design D14-стиль: единый источник имён).
+    """
+    from src.handlers.settings_screen import WAIT_SETTING_VALUE
+
+    data = getattr(context, "user_data", None)
+    if isinstance(data, dict):
+        data.pop(WAIT_SETTING_VALUE, None)
 
 
 # --------------------------------------------------------- Обработчики

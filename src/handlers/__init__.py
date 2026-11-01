@@ -10,6 +10,21 @@
 
 from __future__ import annotations
 
+from src import texts
+
+
+async def help_command(update, context) -> None:
+    """Команда /help: дословный текст §7.28 (задача 3.2, design D26).
+
+    Доступна в ЛЮБОМ состоянии (бодрствует/спит, внутри FSM-диалогов
+    backfill/настройки): обработчик ТОЛЬКО отвечает текстом — не пишет
+    в БД, не меняет настройки и не трогает фазы в context.user_data
+    (открытые диалоги остаются активны — справка поверх).
+    """
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(texts.HELP)
+
 
 def register_handlers(application) -> None:
     """Зарегистрировать обработчики задач в Application (вызывает src.main).
@@ -27,6 +42,12 @@ def register_handlers(application) -> None:
     from src.handlers import backfill, common, events, hint, history, settings_screen, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
+    # Справка /help (add-settings-history 3.2, ТЗ §7.28/§10.2, design
+    # D26): дословный текст §7.28 в любом состоянии — БД, состояние,
+    # настройки и FSM-фазы не трогаются (справка поверх). Регистрация
+    # рядом с /start (D26); хендлер — в этом же модуле, чтобы
+    # `import src.handlers` оставался ленивым по repositories.
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND, backfill.backfill_time_message

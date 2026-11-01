@@ -39,6 +39,8 @@ from telegram.ext import ContextTypes
 
 from src import texts
 from src.handlers import common
+from src.handlers.backfill import CONFIRM_OVERWRITE_KEY
+from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.services.access import is_observer
 from src.services.event import get_user
 from src.services.settings import (
@@ -71,6 +73,17 @@ CALLBACK_PATTERN = r"^settings:(show|cancel|edit:.+)$"
 # В user_data хранится РЕДАКТИРУЕМЫЙ ключ (design D10-стиль: фазы диалога
 # — в context.user_data, один процесс).
 WAIT_SETTING_VALUE = "wait_setting_value"
+
+# Фазы backfill-диалога заднего числа (группа 0) — ЧЕРЕЗ константы
+# владельцев (events.py / backfill.py), без строковых копий (design
+# D14-стиль: единый источник имён ключей user_data). Импорт из соседних
+# модулей handlers сознателен: имена ключей — публичные константы своих
+# модулей, дублировать их здесь значило бы завести вторую копию.
+BACKFILL_PHASE_KEYS: tuple[str, ...] = (
+    WAIT_EVENT_TIME_KEY,  # «ждём текстовый ввод времени» (events.py)
+    PENDING_KIND_KEY,  # вид события диалога (events.py)
+    CONFIRM_OVERWRITE_KEY,  # фаза подтверждения перезаписи §7.13 (backfill.py)
+)
 
 # Состав экрана: группы §7.16 и их ключи (D14: имена — из DEFAULT_KEYS,
 # копий значений нет). «Прочее» — 4 параметра §7.16 + backfill_depth_days
@@ -177,6 +190,28 @@ def _clear_phase(context: ContextTypes.DEFAULT_TYPE) -> bool:
     return False
 
 
+def _clear_backfill_phases(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Снять ВСЕ фазы backfill-диалога заднего числа (группа 0);
+    True — хотя бы одна была активна.
+
+    Взаимное исключение фаз (major review-001-1.2): PTB доставляет текст
+    в ОБЕ группы обработчиков, поэтому одновременные фазы настроек
+    (группа 2) и backfill-диалога (группа 0) приводят к тому, что ввод
+    значения настройки записывает событие сна. Вход в настройки —
+    начало НОВОЙ фазы: предыдущая снимается целиком («фазы не
+    переживают завершение диалога», notes review-001-4.3) — включая
+    фазу подтверждения перезаписи §7.13.
+    """
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return False
+    had_phase = False
+    for phase_key in BACKFILL_PHASE_KEYS:
+        if data.pop(phase_key, None) is not None:
+            had_phase = True
+    return had_phase
+
+
 def _cancel_markup() -> InlineKeyboardMarkup:
     """Кнопка отмены диалога значения (служебная, вне ТЗ §10.3-списка)."""
     return InlineKeyboardMarkup(
@@ -192,6 +227,11 @@ async def _reply_screen(
 ) -> None:
     """Ответ экраном §7.16 по свежим значениям пользователя (без кэша)."""
     _clear_phase(context)  # новый вход в настройки гасит незавершённый диалог
+    # Взаимное исключение фаз (major review-001-1.2): вход в настройки
+    # гасит и фазы backfill-диалога (WAIT_EVENT_TIME, PENDING_KIND,
+    # confirm_overwrite) — иначе текст значения настройки дошёл бы и в
+    # группу 0 и записал событие.
+    _clear_backfill_phases(context)
     settings_map = SettingsService(conn).get_all(user_id)
     await message.reply_text(screen_text(settings_map))
 
@@ -271,6 +311,10 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await message.reply_text(texts.OBSERVER_SETTINGS_DENIED)
                 return
             current = SettingsService(conn).get(user["id"], key)
+            # Взаимное исключение фаз (major review-001-1.2): вход в
+            # диалог правки — начало новой фазы, фазы backfill-диалога
+            # снимаются ДО постановки WAIT_SETTING_VALUE.
+            _clear_backfill_phases(context)
             phase = getattr(context, "user_data", None)
             if isinstance(phase, dict):
                 phase[WAIT_SETTING_VALUE] = key

@@ -25,6 +25,8 @@ import pytest
 from src import texts
 from src.db import init_db
 from src.handlers import settings_screen
+from src.handlers.backfill import CONFIRM_OVERWRITE_KEY, backfill_time_message
+from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.handlers.settings_screen import (
     CALLBACK_SETTINGS_CANCEL,
     CALLBACK_SETTINGS_SHOW,
@@ -34,6 +36,7 @@ from src.repositories.settings import SettingsHistoryRepo
 from src.services.calculation import nap_window
 from src.services.event import get_user
 from src.services.settings import DEFAULT_KEYS, SettingsService
+from src.services.state import KIND_SLEEP
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SPEC_FILE = _REPO_ROOT / "ТЗ_Дневник_сна_ребёнка.md"
@@ -562,3 +565,136 @@ def test_tc_sett_026_texts_match_tz_verbatim():
     assert texts.settings_updated_text(
         "Минимум бодрствования до дневного сна", "5 ч 20 мин", "5 ч 30 мин"
     ) == section_718
+
+
+# ------------------------------ Взаимное исключение фаз (review-001-1.2)
+
+
+def _arm_backfill_phases(context) -> None:
+    """Зарядить в user_data ВСЕ фазы backfill-диалога (группа 0) — как
+    после «⏪ Ввести время вручную» в открытом диалоге заднего числа."""
+    context.user_data[WAIT_EVENT_TIME_KEY] = True
+    context.user_data[PENDING_KIND_KEY] = KIND_SLEEP
+    context.user_data[CONFIRM_OVERWRITE_KEY] = {
+        "event_id": 1,
+        "when_utc": "2026-11-01 10:00:00",
+    }
+
+
+def _type_time_backfill(db_path, context, text: str, telegram_id: int = 4242):
+    """Провести текст через обработчик группы 0 (backfill_time_message) —
+    как в реальном боте, где апдейт получают ОБЕ группы."""
+    update = _FakeTextUpdate(telegram_id, text)
+    asyncio.run(backfill_time_message(update, context))  # type: ignore[arg-type]
+    return update
+
+
+def _enter_settings(db_path, how: str, context=None):
+    """Вход в настройки одним из трёх путей (ТЗ §10.2–10.3) на ОБЩЕМ
+    context (та же фаза FSM): callback settings:show / команда /settings /
+    текст панели «⚙️ Настройки»."""
+    if how == "callback":
+        return _press(db_path, CALLBACK_SETTINGS_SHOW, context=context)
+    if how == "command":
+        update = _FakeTextUpdate(4242, "/settings")
+        ctx = context if context is not None else _FakeContext(db_path)
+        asyncio.run(settings_screen.settings_command(update, ctx))  # type: ignore[arg-type]
+        return update, ctx
+    if how == "panel":
+        from src.handlers import common
+
+        update = _FakeTextUpdate(4242, settings_screen.BTN_SETTINGS)
+        ctx = context if context is not None else _FakeContext(db_path)
+
+        async def _run():
+            conn = common.open_conn(ctx)
+            try:
+                user = get_user(conn, 4242)
+                await settings_screen.reply_settings_button(
+                    update, ctx, conn, user  # type: ignore[arg-type]
+                )
+            finally:
+                conn.close()
+
+        asyncio.run(_run())
+        return update, ctx
+    raise ValueError(f"unknown entry path: {how}")  # pragma: no cover
+
+
+def test_tc_sett_027_settings_entry_clears_backfill_phases(db_path):
+    """TC-SETT-027: вход в настройки (settings:show, /settings, «⚙️
+    Настройки» панели) при открытом backfill-диалоге снимает ВСЕ его
+    фазы (WAIT_EVENT_TIME, PENDING_KIND, confirm_overwrite).
+
+    Трассировка: review-001-1.2 замечание 1 (major, рекомендация «а»);
+    «фазы не переживают завершение диалога» (notes review-001-4.3).
+    """
+    init_db(db_path)
+    conn = init_db(db_path)
+    for how in ("callback", "command", "panel"):
+        context = _FakeContext(db_path)
+        _arm_backfill_phases(context)
+        _enter_settings(db_path, how, context)
+        assert WAIT_EVENT_TIME_KEY not in context.user_data, how
+        assert PENDING_KIND_KEY not in context.user_data, how
+        assert CONFIRM_OVERWRITE_KEY not in context.user_data, how
+        assert _event_count(conn) == 0
+    conn.close()
+
+
+def test_tc_sett_028_edit_entry_clears_backfill_phases(db_path):
+    """TC-SETT-028: вход в диалог правки (settings:edit:<key>) при
+    открытом backfill-диалоге снимает фазы группы 0 и ставит фазу
+    WAIT_SETTING_VALUE.
+
+    Трассировка: review-001-1.2 замечание 1 (major, рекомендация «а»)
+    и замечание 2 (minor — фаза ставится только на входе в диалог).
+    """
+    init_db(db_path)
+    context = _FakeContext(db_path)
+    _arm_backfill_phases(context)
+    update, context = _press(
+        db_path, "settings:edit:wake_deadline", context=context
+    )
+
+    assert WAIT_EVENT_TIME_KEY not in context.user_data
+    assert PENDING_KIND_KEY not in context.user_data
+    assert CONFIRM_OVERWRITE_KEY not in context.user_data
+    assert context.user_data.get(WAIT_SETTING_VALUE) == "wake_deadline"
+    # Диалог §7.17 открыт.
+    assert update.effective_message.replies[0].startswith(
+        "Введите новое значение для «Крайнее время пробуждения от дневного сна»"
+    )
+
+
+def test_tc_sett_029_value_goes_to_setting_not_event(db_path):
+    """TC-SETT-029: интерливинг из review-001-1.2 — открыт backfill-диалог
+    → вход в настройки (edit wake_deadline) → ввод «13:20» записывает
+    НАСТРОЙКУ (§7.18), а НЕ событие сна: группа 0 молчит (0 ответов,
+    sleep_events не растёт).
+
+    Трассировка: review-001-1.2 замечание 1 (major, адверсариальная
+    атака «Интерливинг фаз group0×group2» — был FAIL).
+    """
+    conn = init_db(db_path)
+    user = get_user(conn, 4242)
+    SettingsService(conn).seed_defaults(user["id"])
+    context = _FakeContext(db_path)
+    _arm_backfill_phases(context)
+    _, context = _press(db_path, "settings:edit:wake_deadline", context=context)
+
+    # Апдейт «13:20» получают ОБЕ группы: сначала группа 0 (backfill),
+    # затем группа 2 (настройки) — как в реальном боте.
+    group0 = _type_time_backfill(db_path, context, "13:20")
+    assert group0.effective_message.replies == []  # молча, без записи
+    group2 = _type_value(db_path, context, "13:20")
+
+    assert group2.effective_message.replies == [
+        texts.settings_updated_text(
+            "Крайнее время пробуждения от дневного сна", "15:30", "13:20"
+        )
+    ]
+    assert SettingsService(conn).get(user["id"], "wake_deadline") == "13:20"
+    assert _event_count(conn) == 0  # событие сна НЕ создано
+    assert len(_history_rows(conn, user["id"])) == 1  # правка настройки — одна
+    conn.close()

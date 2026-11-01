@@ -111,6 +111,96 @@ def create_event(
     }
 
 
+# ------------------------- Атомарная ПАРА задним числом (3.1, FR-51)
+
+def _ensure_pair_step(
+    conn: sqlite3.Connection, user_id: int, kind: str
+) -> None:
+    """D5-проверки ОДНОГО шага пары перед stage-вставкой (3.1-fix).
+
+    Те же гарантии, что у create_event (FR-7, FR-8): вид допустим;
+    состояние соответствует кнопке (перечитано из БД); нет незакрытого
+    такого же события. БЕЗ записи — вставку и commit делает
+    create_event_pair. Проверка шага 2 (wake) выполняется ПОСЛЕ
+    stage-вставки засыпания и видит её: тот же conn, та же транзакция
+    (повторяет последовательность двух create_event).
+    """
+    if kind not in VALID_KINDS:
+        raise ValueError(f"недопустимый вид события: {kind!r}")
+
+    # Состояние всегда перечитывается из БД (design D5, без кэша).
+    current_state = state.get_state(conn, user_id)
+    expected = state.STATE_AWAKE if kind == KIND_SLEEP else state.STATE_ASLEEP
+    if current_state != expected:
+        raise ValueError(
+            f"состояние {current_state!r} не соответствует кнопке {kind!r}"
+        )
+
+    # Незакрытое событие того же вида (последнее — по created_at, затем id,
+    # design D12): повторное sleep при спящем / wake при бодрствующем.
+    last = SleepEventsRepo(conn).last(user_id)
+    if last is not None and last["event_type"] == kind:
+        raise ValueError(f"незакрытое событие {kind!r} уже существует")
+
+
+def create_event_pair(
+    conn: sqlite3.Connection,
+    user_id: int,
+    sleep_utc: str,
+    wake_utc: str,
+) -> tuple[dict, dict]:
+    """Атомарно создать ПАРУ sleep+wake задним числом (3.1-fix, FR-51).
+
+    Задача 3.1-fix (review-001-3.1 major №1): обе вставки — ОДНА
+    транзакция (SleepEventsRepo.stage_insert ×2 + один commit, паттерн
+    stage_upsert репозитория settings). При отказе ЛЮБОГО шага (ValueError
+    от D5-проверок или вставки) commit НЕ выполняется — вызывающий
+    обработчик делает rollback, полупара (незакрытый сон без
+    пробуждения) в БД невозможна. Существующий create_event НЕ менялся —
+    одиночные ветки пишут как раньше (каждая вставка — свой commit).
+
+    Порядок шагов и проверки — как у последовательных create_event:
+    D5-проверка засыпания → stage sleep → D5-проверка пробуждения
+    (видит staged sleep: тот же conn/транзакция) → stage wake → commit.
+
+    Ре-шедул напоминаний (FR-41) — ОДИН вызов ПОСЛЕ успешного коммита
+    ПАРЫ (хук не срабатывает при откате; ReminderScheduler.reschedule
+    идемпотентен, design D19). when_utc/sleep_utc — строки UTC
+    «YYYY-MM-DD HH:MM:SS» (design D4). Возвращает (sleep, wake) —
+    созданные записи (dict из SleepEventsRepo-полей).
+    """
+    repo = SleepEventsRepo(conn)
+    _ensure_pair_step(conn, user_id, KIND_SLEEP)
+    sleep_id = repo.stage_insert(
+        user_id, KIND_SLEEP, sleep_utc, is_backfilled=True
+    )
+    _ensure_pair_step(conn, user_id, KIND_WAKE)
+    wake_id = repo.stage_insert(
+        user_id, KIND_WAKE, wake_utc, is_backfilled=True
+    )
+    conn.commit()  # единственный commit: атомарность пары (3.1-fix)
+    _notify_scheduler()
+    sleep_record = {
+        "id": sleep_id,
+        "user_id": user_id,
+        "event_type": KIND_SLEEP,
+        "timestamp": sleep_utc,
+        "is_backfilled": True,
+        "sleep_type": None,  # design D6: разметка — расчёт при чтении
+        "is_merged": None,   # design D9: склейка — расчёт при чтении
+    }
+    wake_record = {
+        "id": wake_id,
+        "user_id": user_id,
+        "event_type": KIND_WAKE,
+        "timestamp": wake_utc,
+        "is_backfilled": True,
+        "sleep_type": None,
+        "is_merged": None,
+    }
+    return sleep_record, wake_record
+
+
 def list_raw_events(
     conn: sqlite3.Connection, user_id: int
 ) -> list[dict]:

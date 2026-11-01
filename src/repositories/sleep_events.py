@@ -43,6 +43,33 @@ class SleepEventsRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def stage_insert(
+        self,
+        user_id: int,
+        event_type: str,
+        timestamp: str,
+        *,
+        is_backfilled: bool = False,
+        created_at: str | None = None,
+    ) -> int:
+        """INSERT БЕЗ commit — для одной транзакции ПАРЫ (3.1-fix).
+
+        Задача 3.1-fix (review-001-3.1 major №1, FR-51): обе вставки пары
+        задним числом обязаны коммититься ОДНОЙ транзакцией — полупара
+        (незакрытый сон без пробуждения) в БД недопустима. Транзакцию
+        открывает и завершает вызывающий сервис (паттерн stage_upsert
+        репозитория settings). Возвращает id строки.
+        """
+        cur = self._conn.execute(
+            "INSERT INTO sleep_events (user_id, event_type, timestamp, "
+            "created_at, is_backfilled, sleep_type, is_merged) "
+            "VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+            (user_id, event_type, timestamp, created_at or _utcnow_iso(), int(is_backfilled)),
+        )
+        row_id = cur.lastrowid
+        assert row_id is not None  # всегда задан после успешного INSERT
+        return row_id
+
     def insert(
         self,
         user_id: int,
@@ -52,20 +79,20 @@ class SleepEventsRepo:
         is_backfilled: bool = False,
         created_at: str | None = None,
     ) -> int:
-        """Записать сыгое событие; вернуть id строки.
+        """Записать сыгое событие собственным commit; вернуть id строки.
 
-        Только сырые поля (FR-3, design D6): sleep_type и is_merged остаются
-        NULL. Валидность event_type гарантирует CHECK в схеме (ТЗ §9.2).
+        Одиночные ветки (кнопки «сейчас», одиночный backfill) — без
+        изменений: stage_insert + commit. Парный ввод — create_event_pair
+        (services/event.py) через stage_insert БЕЗ этого commit.
         """
-        cur = self._conn.execute(
-            "INSERT INTO sleep_events (user_id, event_type, timestamp, "
-            "created_at, is_backfilled, sleep_type, is_merged) "
-            "VALUES (?, ?, ?, ?, ?, NULL, NULL)",
-            (user_id, event_type, timestamp, created_at or _utcnow_iso(), int(is_backfilled)),
+        row_id = self.stage_insert(
+            user_id,
+            event_type,
+            timestamp,
+            is_backfilled=is_backfilled,
+            created_at=created_at,
         )
         self._conn.commit()
-        row_id = cur.lastrowid
-        assert row_id is not None  # всегда задан после успешного INSERT
         return row_id
 
     def list_by_user(self, user_id: int) -> list[dict]:

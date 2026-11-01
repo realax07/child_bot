@@ -52,9 +52,11 @@
 # (event.detect_pair_conflict, один вызов): порядок wake > sleep и
 # пересечение интервала пары с существующими событиями; конфликт → §7.13
 # [Изменить]/[Отмена] (CONFIRM_PAIR_KEY; «Изменить» переспрашивает пару
-# с шага 1, «Отменить» гасит всё). Без конфликта создаются ОБА события
-# (create_event, is_backfilled=1; каждая запись — точка ре-шедула
-# напоминаний FR-41) и ответ §7.14-стиль (сводка PB-3 + окно, сборщики
+# [Изменить] переспрашивает пару с шага 1, «Отменить» гасит всё). Без
+# конфликта пара создаётся АТОМАРНО (3.1-fix review-001-3.1:
+# create_event_pair — ОБЕ вставки одной транзакцией, is_backfilled=1;
+# полупара в БД невозможна; ре-шедул FR-41 — после коммита пары) и
+# ответ §7.14-стиль (сводка PB-3 + окно, сборщики
 # существующие). Глубина §7.15 — для ОБОИХ времён пары. Разбор по фазам
 # БЕЗ маркера пары (легаси-пробы WAIT_EVENT_TIME + PENDING_KIND) идёт
 # одиночной веткой — behavior существующего backfill сохранён (FR-51:
@@ -92,6 +94,7 @@ from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, reso
 from src.services.event import (
     ROLE_OBSERVER,
     create_event,
+    create_event_pair,
     detect_conflict,
     detect_pair_conflict,
     get_user,
@@ -111,6 +114,16 @@ CONFIRM_OVERWRITE_KEY = "confirm_overwrite"
 
 # Формат строки UTC БД (design D4) — единая константа модуля.
 _TS_DB_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Отказ-текст при неудачной записи ПАРЫ (3.1-fix, review-001-3.1 major №1):
+# при откате транзакции пары пользователь получает честный ответ —
+# молчаливый проглот запрещён (полупары в БД нет, но фазы сняты и ввод
+# не записан). Текст служебный (вне ТЗ §7) — держится в модуле обработчика
+# (жёсткая зона фикса), как до переноса текстов задачи 4.2.
+BACKFILL_PAIR_FAILED = (
+    "⚠️ Не удалось записать сон — состояние изменилось. "
+    "Попробуйте ещё раз."
+)
 
 
 def is_waiting_for_time(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -311,10 +324,12 @@ async def _pair_wake_message(
     После разбора — ЕДИНАЯ проверка ПАРЫ (detect_pair_conflict, один
     вызов): порядок wake > sleep и пересечение интервала пары с
     существующими событиями. Конфликт → §7.13 [Изменить]/[Отмена] (оба
-    момента — в фазе CONFIRM_PAIR_KEY). Без конфликта создаются ОБА
-    события (create_event ×2, is_backfilled=1; каждая запись — точка
-    ре-шедула напоминаний FR-41) и ответ §7.14-стиль: факт + строка
-    следующего сна + сводка PB-3 (существующие сборщики переиспользованы).
+    момента — в фазе CONFIRM_PAIR_KEY). Без конфликта пара создаётся
+    АТОМАРНО (create_event_pair — одна транзакция, 3.1-fix review-001-3.1;
+    is_backfilled=1; ре-шедул FR-41 — один вызов после коммита пары) и
+    ответ §7.14-стиль: факт + строка следующего сна + сводка PB-3
+    (существующие сборщики переиспользованы). Отказ записи → rollback +
+    честный отказ-ответ (полупара в БД невозможна).
     """
     if update.message is None or update.effective_user is None:
         return
@@ -353,18 +368,21 @@ async def _pair_wake_message(
             return
 
         try:
-            # Сначала засыпание, затем пробуждение: create_event
-            # перечитывает состояние из БД (design D5) — пара записывается
-            # согласованно; каждая запись — точка ре-шедула (FR-41).
-            create_event(conn, user["id"], KIND_SLEEP, sleep_utc, is_backfilled=True)
-            create_event(conn, user["id"], KIND_WAKE, when_utc, is_backfilled=True)
+            # Атомарная ПАРА (3.1-fix, review-001-3.1 major №1): обе
+            # вставки — одна транзакция (create_event_pair: stage ×2 +
+            # один commit); D5-проверки обоих шагов выполняет сервис.
+            create_event_pair(conn, user["id"], sleep_utc, when_utc)
             # §7.14-стиль по моменту пробуждения пары (страница дня —
             # страница ввода; сборщики существующие, задача 3.1).
             answer = _backfill_success_text(conn, user, when_utc)
         except ValueError:
             # Состояние изменилось между проверкой и записью (design D5):
-            # пара НЕ создана, фазы сняты — без ответа «успех».
+            # транзакция пары НЕ закоммичена — staged-строки откатываются,
+            # в БД НЕТ ни полупары, ни дублей (3.1-fix: молчаливый проглот
+            # запрещён — честный отказ-ответ пользователю).
+            conn.rollback()
             _clear_conflict_phases(context)
+            await update.message.reply_text(BACKFILL_PAIR_FAILED)
             return
     finally:
         conn.close()

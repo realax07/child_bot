@@ -14,6 +14,12 @@
 #   - взаимное исключение фаз с настройками в ОБЕ стороны;
 #   - глубина §7.15 — для ОБОИХ времён пары.
 #
+# 3.1-fix (review-001-3.1 major №1 + minor №2):
+#   - атомарность: отказ второй вставки → rollback, в БД НЕТ полупары,
+#     ответ пользователю НЕ пуст (TC-PBACK-011);
+#   - будущее время (FR-20) на шаге 1 (TC-PBACK-012) и шаге 2
+#     (TC-PBACK-013) — предупреждение, фаза шага сохранена.
+#
 # Правило rule 6: каждый тест несёт TC-PBACK-NNN в первой строке
 # докстринга. Время зафиксировано в фикстуре frozen_now: 8:00 МСК 10.10
 # (обёртка parse_time_input + events.datetime — как в test_backfill_success,
@@ -384,10 +390,12 @@ def test_tc_pback_004_open_sleep_asks_wake_only(db_path, conn, frozen_now):
 
 
 def test_tc_pback_005_pair_reschedules_reminders(db_path, conn, frozen_now):
-    """TC-PBACK-005 (FR-41, design D10/D23): после записи пары план
-    напоминаний пересчитан — точка EventService (scheduler.
-    notify_events_changed → ReminderScheduler.reschedule) вызвана на
-    КАЖДОЙ из двух записей (sleep, wake)."""
+    """TC-PBACK-005 (FR-41, design D10/D23; 3.1-fix): после записи пары
+    план напоминаний пересчитан — точка EventService (scheduler.
+    notify_events_changed → ReminderScheduler.reschedule) вызвана РОВНО
+    ОДИН раз, ПОСЛЕ успешного коммита ПАРЫ (create_event_pair — атомарная
+    транзакция; reschedule идемпотентен, design D19; при откате пары хук
+    не срабатывает)."""
     fake = _FakeScheduler()
     scheduler_mod._set_active(fake)  # как в живом процессе (design D19)
     try:
@@ -403,7 +411,8 @@ def test_tc_pback_005_pair_reschedules_reminders(db_path, conn, frozen_now):
         scheduler_mod._set_active(None)
 
     assert len(_event_rows(conn, 7005)) == 2
-    assert fake.reschedule_calls == 2
+    # 3.1-fix: ОДИН вызов на пару — после успешного коммита обеих вставок.
+    assert fake.reschedule_calls == 1
 
 
 def test_tc_pback_006_pair_conflict_cancel_clears_everything(
@@ -566,3 +575,89 @@ def test_tc_pback_010_bad_format_on_step_two_keeps_phase(db_path, conn, frozen_n
     update, context = _send_text(db_path, "вчера 15:15", context.user_data, 7010)
     assert "✅ Событие записано на 15:15." in update.effective_message.replies[0]
     assert len(_event_rows(conn, 7010)) == 2
+
+
+def test_tc_pback_011_pair_insert_failure_atomic_rollback(db_path, conn, frozen_now, monkeypatch):
+    """TC-PBACK-011 (3.1-fix, review-001-3.1 major №1): отказ ВТОРОЙ
+    вставки пары (инъекция ValueError в SleepEventsRepo.stage_insert на
+    wake) через РЕАЛЬНЫЙ обработчик → транзакция пары откачена: в БД НЕТ
+    полупары (0 событий), фазы сняты, пользователь получил честный
+    отказ-ответ (молчаливого проглота нет)."""
+    real_stage = SleepEventsRepo.stage_insert
+    staged = {"kinds": []}
+
+    def _flaky_stage(self, user_id, event_type, timestamp, **kwargs):
+        staged["kinds"].append(event_type)
+        if event_type == "wake":
+            raise ValueError("инъекция отказа второй вставки (TC-PBACK-011)")
+        return real_stage(self, user_id, event_type, timestamp, **kwargs)
+
+    monkeypatch.setattr(SleepEventsRepo, "stage_insert", _flaky_stage)
+
+    update, context = _run_pair_dialog(
+        db_path, "вчера 13:40", "вчера 15:15", telegram_id=7011
+    )
+
+    # Дошли до второй вставки — отказ случился МЕЖДУ вставками пары.
+    assert staged["kinds"] == ["sleep", "wake"]
+    # Атомарность: staged sleep откачен — в БД НЕТ полупары (0 событий).
+    assert _event_rows(conn, 7011) == []
+    # Честный ответ пользователю (не пуст, не «успех»).
+    assert update.effective_message.replies == [backfill.BACKFILL_PAIR_FAILED]
+    assert update.effective_message.replies[0].startswith("⚠️")
+    # Фазы диалога сняты.
+    for key in (
+        WAIT_EVENT_TIME_KEY,
+        PENDING_KIND_KEY,
+        WAIT_PAIR_SLEEP_KEY,
+        WAIT_PAIR_WAKE_KEY,
+    ):
+        assert key not in context.user_data
+
+
+def test_tc_pback_012_future_time_on_step_one_keeps_phase(db_path, conn, frozen_now):
+    """TC-PBACK-012 (FR-20, minor №2 review-001-3.1): будущее время на
+    ШАГЕ 1 пары («завтра 13:40») → предупреждение БЕЗ записи, фаза шага 1
+    СОХРАНЕНА; после валидного ввода пара проходит оба шага и создаётся."""
+    _, context = _press_callback(db_path, "event:sleep", {}, 7012)
+    _, context = _press_callback(db_path, "time:manual", context.user_data, 7012)
+    update, context = _send_text(db_path, "завтра 13:40", context.user_data, 7012)
+
+    assert update.effective_message.replies == [texts.FUTURE_TIME_WARNING]
+    assert _event_rows(conn, 7012) == []
+    # Фаза шага 1 сохранена — пользователь вводит время засыпания заново.
+    assert context.user_data.get(WAIT_PAIR_SLEEP_KEY) is True
+    assert WAIT_PAIR_WAKE_KEY not in context.user_data
+
+    update, context = _send_text(db_path, "вчера 13:40", context.user_data, 7012)
+    assert update.effective_message.replies == [PAIR_ASK_WAKE]
+    update, context = _send_text(db_path, "вчера 15:15", context.user_data, 7012)
+    assert "✅ Событие записано на 15:15." in update.effective_message.replies[0]
+    assert len(_event_rows(conn, 7012)) == 2
+
+
+def test_tc_pback_013_future_time_on_step_two_keeps_sleep_utc(db_path, conn, frozen_now):
+    """TC-PBACK-013 (FR-20, minor №2 review-001-3.1): будущее время на
+    ШАГЕ 2 пары («завтра 15:15») → предупреждение БЕЗ записи, фаза шага 2
+    СОХРАНЕНА вместе с sleep_utc (засыпание шага 1 не потеряно); валидный
+    ввод после — пара завершена (2 события, оба is_backfilled=1)."""
+    _, context = _press_callback(db_path, "event:sleep", {}, 7013)
+    _, context = _press_callback(db_path, "time:manual", context.user_data, 7013)
+    _, context = _send_text(db_path, "вчера 13:40", context.user_data, 7013)
+
+    update, context = _send_text(db_path, "завтра 15:15", context.user_data, 7013)
+    assert update.effective_message.replies == [texts.FUTURE_TIME_WARNING]
+    assert _event_rows(conn, 7013) == []
+    # Фаза шага 2 с sleep_utc сохранена (шаг 1 не потерян).
+    assert context.user_data.get(WAIT_PAIR_WAKE_KEY) == {
+        "sleep_utc": _utc_str(_yesterday_at(13, 40))
+    }
+
+    update, context = _send_text(db_path, "вчера 15:15", context.user_data, 7013)
+    assert "✅ Событие записано на 15:15." in update.effective_message.replies[0]
+    rows = _event_rows(conn, 7013)
+    assert [(r["event_type"], r["timestamp"]) for r in rows] == [
+        ("sleep", _utc_str(_yesterday_at(13, 40))),
+        ("wake", _utc_str(_yesterday_at(15, 15))),
+    ]
+    assert all(r["is_backfilled"] for r in rows)

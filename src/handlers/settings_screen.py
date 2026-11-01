@@ -54,15 +54,15 @@ from src.services.settings import (
     _WINDOW_KEYS,
 )
 
-# Текст кнопки «⚙️ Настройки» (ТЗ §6, дословно). Константа — здесь, а не в
-# services/state.py: state.py ВНЕ зоны записи задачи 1.2 (санкция ПМ).
-# Физическое добавление кнопки в REPLY_KEYBOARD/build_menu — волна 2,
-# задача 2.0 (решение за ПМ); маршрутизация текста уже подключена в
-# common.py, команда /settings работает уже сейчас (ТЗ §10.2).
-BTN_SETTINGS = "⚙️ Настройки"
-
-# callback_data (ТЗ §10.3).
-CALLBACK_SETTINGS_SHOW = "settings:show"
+# Текст кнопки «⚙️ Настройки» (ТЗ §6, дословно) и callback-контракт
+# settings:show (§10.3) — ЕДИНЫЙ источник src/services/state.py (design
+# D14): add-settings-history 2.0 перенёс константы туда, где лежат все
+# кнопочные константы меню, — кнопка теперь физически в
+# REPLY_KEYBOARD/build_menu. Импорт (не копия): направление «handler →
+# service» допустимо (D1), обратное — нет, поэтому определение живёт в
+# state.py, а не наоборот. Имя BTN_SETTINGS оставлено экспортом модуля —
+# на него ссылаются common.py и тесты.
+from src.services.state import BTN_SETTINGS, CALLBACK_SETTINGS_SHOW
 CALLBACK_SETTINGS_CANCEL = "settings:cancel"
 CALLBACK_EDIT_PREFIX = "settings:edit:"
 

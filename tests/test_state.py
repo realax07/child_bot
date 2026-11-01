@@ -34,6 +34,10 @@ from src.repositories.sleep_events import SleepEventsRepo
 from src.repositories.users import UsersRepo
 from src.services.state import (
     BTN_HINT,
+    BTN_HISTORY,
+    BTN_SETTINGS,
+    CALLBACK_HISTORY,
+    CALLBACK_SETTINGS_SHOW,
     REPLY_BUTTONS,
     REPLY_KEYBOARD,
     STATE_ASLEEP,
@@ -186,7 +190,7 @@ def test_is_stale_callback_guard(conn):
     # kind_of_button: текст → вид для обработчиков 2.3
     assert kind_of_button(BTN_SLEEP) == KIND_SLEEP
     assert kind_of_button(BTN_WAKE) == KIND_WAKE
-    assert kind_of_button("⚙️ Настройки") is None
+    assert kind_of_button(BTN_SETTINGS) is None
 
 
 def test_menu_has_undo_button_in_both_states(conn):
@@ -203,11 +207,12 @@ def test_menu_has_undo_button_in_both_states(conn):
         assert BTN_UNDO in texts_, expected_state
         event_buttons = [t for t in texts_ if t in (BTN_SLEEP, BTN_WAKE)]
         assert event_buttons == [event_btn], expected_state
-        # callback-контракты задач 2.3/2.4 на месте
+        # callback-контракты задач 2.3/2.4 + новых кнопок 2.0 на месте
         datas = _callback_datas(markup)
-        assert CALLBACK_UNDO in datas and len(datas) == 2
-        # «Отменить последнее» — отдельной строкой под событийной кнопкой
-        assert len(markup.inline_keyboard) == 2
+        assert CALLBACK_UNDO in datas and len(datas) == 4
+        # «Отменить последнее» — отдельной строкой под строкой события и
+        # «История»/«Настройки» (ТЗ §6, add-settings-history 2.0)
+        assert len(markup.inline_keyboard) == 3
 
         if expected_state == STATE_AWAKE:
             # и через реальное чтение БД то же самое
@@ -245,9 +250,23 @@ def test_reply_panel_has_hint_button_in_both_states(conn):
     None, FR-32: подсказка не создаёт запись)."""
     assert BTN_HINT == "⏰ Подсказка сейчас"  # ТЗ §6 дословно
     flat = [t for row in REPLY_KEYBOARD for t in row]
-    assert flat == [BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]
-    assert REPLY_BUTTONS == (BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO)
-    assert len(REPLY_KEYBOARD) == 1  # события и подсказка — одна строка
+    assert flat == [
+        BTN_SLEEP,
+        BTN_WAKE,
+        BTN_HINT,
+        BTN_HISTORY,
+        BTN_SETTINGS,
+        BTN_UNDO,
+    ]
+    assert REPLY_BUTTONS == (
+        BTN_SLEEP,
+        BTN_WAKE,
+        BTN_HINT,
+        BTN_HISTORY,
+        BTN_SETTINGS,
+        BTN_UNDO,
+    )
+    assert len(REPLY_KEYBOARD) == 3  # события+подсказка / история+настройки / отмена
 
     markup = common.build_reply_keyboard()
     texts_ = [btn.text for row in markup.keyboard for btn in row]
@@ -255,3 +274,96 @@ def test_reply_panel_has_hint_button_in_both_states(conn):
 
     # Подсказка — не событийная кнопка: route определяется в common, kind нет.
     assert kind_of_button(BTN_HINT) is None
+
+
+def test_menu_has_history_and_settings_buttons_in_both_states(conn):
+    """TC-STATE-008 (ТЗ §6, FR-48/FR-42, add-settings-history 2.0):
+    build_menu ОБОИХ состояний содержит «📊 История за неделю» и
+    «⚙️ Настройки» — тексты дословно §6, callback-контракты §10.3
+    («history:week», «settings:show»), layout §6: после строки события,
+    до «↩️ Отменить последнее». Обе кнопки — НЕ событийные
+    (kind_of_button → None): событий не создают, guard событийных
+    кнопок не затронут."""
+    assert BTN_HISTORY == "📊 История за неделю"  # ТЗ §6 дословно
+    assert BTN_SETTINGS == "⚙️ Настройки"  # ТЗ §6 дословно
+
+    for state_ in (STATE_AWAKE, STATE_ASLEEP):
+        markup = build_markup(state_)
+        texts_ = _button_texts(markup)
+        assert BTN_HISTORY in texts_ and BTN_SETTINGS in texts_, state_
+        datas = _callback_datas(markup)
+        assert CALLBACK_HISTORY in datas, state_
+        assert CALLBACK_SETTINGS_SHOW in datas, state_
+        # Layout §6: обе новые кнопки между строкой события и «Отменить»
+        assert texts_.index(BTN_HISTORY) < texts_.index(BTN_UNDO), state_
+        assert texts_.index(BTN_SETTINGS) < texts_.index(BTN_UNDO), state_
+
+    # Не событийные кнопки: kind нет — запись событий через них невозможна.
+    assert kind_of_button(BTN_HISTORY) is None
+    assert kind_of_button(BTN_SETTINGS) is None
+
+
+class _FakeRouteMessage:
+    """Сообщение reply-панели: текст кнопки + накопитель ответов."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.replies: list[str] = []
+
+    async def reply_text(self, reply, reply_markup=None):
+        self.replies.append(reply)
+
+
+class _FakeRouteUpdate:
+    def __init__(self, user_id: int, text: str) -> None:
+        self.effective_user = type("U", (), {"id": user_id})()
+        self.callback_query = None
+        self.message = _FakeRouteMessage(text)
+        self.effective_message = self.message
+
+
+class _FakeRouteContext:
+    def __init__(self, db_path) -> None:
+        self.bot_data = {"db_path": db_path}
+        self.user_data: dict = {}
+
+
+def test_reply_button_message_routes_new_buttons(tmp_path):
+    """TC-STATE-009 (ТЗ §6/§10.3, add-settings-history 2.0): обе новые
+    текстовые кнопки панели распознаны common.reply_button_message:
+    «⚙️ Настройки» → экран §7.16 (тот же ответ, что callback
+    settings:show / команда /settings); «📊 История за неделю» —
+    распознана как кнопка панели, но БЕЗ ответа и БЕЗ записи событий
+    (обработчик history:week — задача 2.1, вне зоны 2.0; state-ui spec:
+    нажатие не меняет дневник). Произвольный текст — молча."""
+    from src import texts
+    from src.repositories.sleep_events import SleepEventsRepo
+
+    db = tmp_path / "bot.db"
+
+    # «📊 История за неделю»: без записи и без ответа (маршрут 2.1)
+    update = _FakeRouteUpdate(3001, BTN_HISTORY)
+    asyncio.run(
+        common.reply_button_message(update, _FakeRouteContext(db))  # type: ignore[arg-type]
+    )
+    assert update.effective_message.replies == []
+    conn = init_db(db)
+    assert SleepEventsRepo(conn).list_by_user(1) == []
+
+    # «⚙️ Настройки»: экран §7.16, событий тоже нет
+    update = _FakeRouteUpdate(3002, BTN_SETTINGS)
+    asyncio.run(
+        common.reply_button_message(update, _FakeRouteContext(db))  # type: ignore[arg-type]
+    )
+    replies = update.effective_message.replies
+    assert len(replies) == 1
+    assert texts.SETTINGS_SCREEN_HEADER in replies[0]
+    assert SleepEventsRepo(conn).list_by_user(2) == []
+
+    # Произвольный текст (не кнопка) — молча, как раньше
+    update = _FakeRouteUpdate(3003, "привет")
+    asyncio.run(
+        common.reply_button_message(update, _FakeRouteContext(db))  # type: ignore[arg-type]
+    )
+    assert update.effective_message.replies == []
+    conn.close()

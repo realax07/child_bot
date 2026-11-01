@@ -58,6 +58,8 @@ from src.services.settings import SettingsService
 from src.services import state as state_mod
 from src.services.state import (
     BTN_HINT,
+    BTN_HISTORY,
+    BTN_SETTINGS,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
@@ -314,10 +316,13 @@ class TestSmokeRecommendation:
             common.REPLY_PANEL_INTRO,
             texts.START,
         ]
-        # reply-панель статична (BUG-002): все четыре кнопки, включая
-        # «⏰ Подсказка сейчас» (ТЗ §6, текстовый вход подсказки).
+        # reply-панель статична (BUG-002): все шесть кнопок, включая
+        # «⏰ Подсказка сейчас» и новые «История»/«Настройки»
+        # (ТЗ §6, add-settings-history 2.0, текстовый вход подсказки).
         assert state_mod.REPLY_KEYBOARD == [
-            [BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]
+            [BTN_SLEEP, BTN_WAKE, BTN_HINT],
+            [BTN_HISTORY, BTN_SETTINGS],
+            [BTN_UNDO],
         ]
         start_menu = start_update.effective_message.reply_markup
         assert CALLBACK_SLEEP in _button_datas(start_menu)

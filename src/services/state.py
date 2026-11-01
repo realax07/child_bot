@@ -26,16 +26,23 @@ STATE_AWAKE = "awake"
 STATE_ASLEEP = "asleep"
 
 # Тексты кнопок меню (ТЗ §6): события + «⏰ Подсказка сейчас» (FR-32,
-# 2.2-fix) + «Отменить последнее».
+# 2.2-fix) + «Отменить последнее» + «📊 История за неделю»/«⚙️ Настройки»
+# (add-settings-history 2.0, FR-48/FR-42; тексты дословно §6).
 BTN_SLEEP = "😴 Заснул"
 BTN_WAKE = "☀️ Проснулся"
 BTN_HINT = "⏰ Подсказка сейчас"
 BTN_UNDO = "↩️ Отменить последнее"
+BTN_HISTORY = "📊 История за неделю"
+BTN_SETTINGS = "⚙️ Настройки"
 
-# callback_data кнопок (контракты задач 2.3/2.4).
+# callback_data кнопок (контракты задач 2.3/2.4; §10.3 — history:week и
+# settings:show, add-settings-history 2.0/D21–D22: обработчик history —
+# задача 2.1, settings:show зарегистрирован задачей 1.2).
 CALLBACK_SLEEP = "event:sleep"
 CALLBACK_WAKE = "event:wake"
 CALLBACK_UNDO = "undo:last"
+CALLBACK_HISTORY = "history:week"
+CALLBACK_SETTINGS_SHOW = "settings:show"
 
 # Виды (kind) событийных кнопок для guard'а (is_stale_callback).
 KIND_SLEEP = "sleep"
@@ -51,8 +58,23 @@ KIND_UNDO = "undo"
 # Чистые данные (без PTB-объектов): ReplyKeyboardMarkup строит слой handlers.
 # ТЗ §6: события и подсказка в одной строке; клавиатура ОБЩАЯ для обоих
 # состояний — «⏰ Подсказка сейчас» валидна и бодрствующему, и спящему.
-REPLY_KEYBOARD: list[list[str]] = [[BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]]
-REPLY_BUTTONS: tuple[str, ...] = (BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO)
+# Порядок §6 (после строки события, до «↩️ Отменить последнее»): история и
+# настройки (add-settings-history 2.0) — обе валидны в обоих состояниях и
+# событий не создают (state-ui spec); «↩️ Отменить последнее» — отдельной
+# строкой, как в inline-меню build_menu.
+REPLY_KEYBOARD: list[list[str]] = [
+    [BTN_SLEEP, BTN_WAKE, BTN_HINT],
+    [BTN_HISTORY, BTN_SETTINGS],
+    [BTN_UNDO],
+]
+REPLY_BUTTONS: tuple[str, ...] = (
+    BTN_SLEEP,
+    BTN_WAKE,
+    BTN_HINT,
+    BTN_HISTORY,
+    BTN_SETTINGS,
+    BTN_UNDO,
+)
 
 _KIND_BY_STATE_BUTTON = {
     BTN_SLEEP: KIND_SLEEP,
@@ -77,13 +99,21 @@ def build_menu(state: str) -> list[list[tuple[str, str]]]:
     """Клавиатура по состоянию: [(текст, callback_data), ...] по строкам (FR-6).
 
     Ровно одна событийная кнопка (awake → «😴 Заснул», asleep →
-    «☀️ Проснулся») и «↩️ Отменить последнее» (design D12) отдельной строкой.
+    «☀️ Проснулся») и «↩️ Отменить последнее» (design D12) отдельной строкой;
+    между ними — «📊 История за неделю» и «⚙️ Настройки» (ТЗ §6,
+    add-settings-history 2.0): валидны в ОБОИХ состояниях, событий не
+    создают (callback-контракты §10.3: history:week — обработчик в задаче
+    2.1, settings:show — settings_screen, задача 1.2).
     """
     if state == STATE_ASLEEP:
         event_row = [(BTN_WAKE, CALLBACK_WAKE)]
     else:
         event_row = [(BTN_SLEEP, CALLBACK_SLEEP)]
-    return [event_row, [(BTN_UNDO, CALLBACK_UNDO)]]
+    return [
+        event_row,
+        [(BTN_HISTORY, CALLBACK_HISTORY), (BTN_SETTINGS, CALLBACK_SETTINGS_SHOW)],
+        [(BTN_UNDO, CALLBACK_UNDO)],
+    ]
 
 
 def kind_of_button(button_text: str) -> str | None:
@@ -91,6 +121,9 @@ def kind_of_button(button_text: str) -> str | None:
 
     Кнопка «↩️ Отменить последнее» сюда не относится: обработчик 2.4
     роутит её по callback_data «undo:last» напрямую, не по тексту.
+    «📊 История за неделю» и «⚙️ Настройки» (2.0) — тоже None: это НЕ
+    событийные кнопки, они не проходят guard is_stale_callback, а
+    маршрутизируются текстово в common.py (событий не создают).
     """
     return _KIND_BY_STATE_BUTTON.get(button_text)
 

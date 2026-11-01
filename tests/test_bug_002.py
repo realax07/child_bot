@@ -29,6 +29,8 @@ from src.repositories.sleep_events import SleepEventsRepo
 from src.services.event import get_user
 from src.services.state import (
     BTN_HINT,
+    BTN_HISTORY,
+    BTN_SETTINGS,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
@@ -111,20 +113,32 @@ def _events(conn, user_id: int) -> list[dict]:
 # ------------------------------------------------------------------ Тесты
 
 
-def test_tc_bug002_001_reply_keyboard_static_four_buttons():
-    """TC-BUG002-001: панель постоянная — статичный список из ровно четырёх
-    кнопок [😴 Заснул] [☀️ Проснулся] [⏰ Подсказка сейчас]
+def test_tc_bug002_001_reply_keyboard_static_six_buttons():
+    """TC-BUG002-001: панель постоянная — статичный список кнопок
+    [😴 Заснул] [☀️ Проснулся] [⏰ Подсказка сейчас] / [📊 История за
+    неделю] [⚙️ Настройки] (ТЗ §6, add-settings-history 2.0) /
     [↩️ Отменить последнее]; разметка PTB
     с resize_keyboard=True и БЕЗ one_time_keyboard (панель не исчезает
     после нажатия — суть хотфикса BUG-002)."""
-    assert REPLY_KEYBOARD == [[BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]]
-    assert len(REPLY_BUTTONS) == 4
+    assert REPLY_KEYBOARD == [
+        [BTN_SLEEP, BTN_WAKE, BTN_HINT],
+        [BTN_HISTORY, BTN_SETTINGS],
+        [BTN_UNDO],
+    ]
+    assert len(REPLY_BUTTONS) == 6
     markup = common.build_reply_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)
     assert markup.resize_keyboard is True
     assert markup.one_time_keyboard is not True
     texts_ = [btn.text for row in markup.keyboard for btn in row]
-    assert texts_ == [BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]
+    assert texts_ == [
+        BTN_SLEEP,
+        BTN_WAKE,
+        BTN_HINT,
+        BTN_HISTORY,
+        BTN_SETTINGS,
+        BTN_UNDO,
+    ]
 
 
 def test_tc_bug002_002_sleep_button_when_asleep_refusal_no_record(db_path, conn):

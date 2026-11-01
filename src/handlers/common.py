@@ -30,9 +30,12 @@ from src.services import state
 from src.services.event import get_user
 from src.services.state import (
     BTN_HINT,
+    BTN_HISTORY,
+    BTN_SETTINGS,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
+    CALLBACK_SETTINGS_SHOW,
     CALLBACK_SLEEP,
     CALLBACK_UNDO,
     CALLBACK_WAKE,
@@ -46,6 +49,9 @@ __all__ = [
     "BTN_WAKE",
     "BTN_UNDO",
     "BTN_HINT",
+    "BTN_HISTORY",
+    "BTN_SETTINGS",
+    "CALLBACK_SETTINGS_SHOW",
     "CALLBACK_SLEEP",
     "CALLBACK_WAKE",
     "CALLBACK_UNDO",
@@ -129,26 +135,26 @@ async def reply_button_message(
     тексту (state.kind_of_button / BTN_UNDO); «⏰ Подсказка сейчас»
     (BTN_HINT) — текстовый маршрут к логике подсказки hint.py (ТЗ §6,
     2.2-fix: callback status:show и текст панели — двойной вход, ТЗ
-    §10.3); «⚙️ Настройки» (settings_screen.BTN_SETTINGS) — текстовый
-    маршрут к экрану настроек (add-settings-history 1.2: callback
-    settings:show и текст панели — тот же двойной вход). Сама кнопка
-    в state.REPLY_KEYBOARD появится в волне 2 (задача 2.0, state.py вне
-    зоны задачи 1.2) — текстовый маршрут уже подключён. Состояние
-    перечитывается из БД (guard D5, services.state). Произвольный текст
-    (не кнопка) — молча без реакции: диалоги заднего числа ведёт
-    backfill.py (задача 4.1 — не ломаем), значения настроек —
-    settings_screen.py (фаза WAIT_SETTING_VALUE, группа 2). Регистрируется
-    в ОТДЕЛЬНОЙ группе PTB (group=1): MessageHandler backfill.py (группа 0)
-    вне фазы диалога молчит, и обновление доходит и до него, и до этого
-    обработчика.
+    §10.3); «⚙️ Настройки» (BTN_SETTINGS, единый источник — state.py,
+    add-settings-history 2.0) — текстовый маршрут к экрану настроек
+    (1.2: callback settings:show и текст панели — тот же двойной вход);
+    «📊 История за неделю» (BTN_HISTORY, 2.0) распознана как кнопка
+    панели, но обработчик истории появится в задаче 2.1
+    (src/handlers/history.py, callback history:week, вне зоны 2.0) — до
+    тех пор нажатие без действия и БЕЗ записи (state-ui spec: нажатие не
+    меняет дневник). Состояние перечитывается из БД (guard D5,
+    services.state). Произвольный текст (не кнопка) — молча без
+    реакции: диалоги заднего числа ведёт backfill.py (задача 4.1 — не
+    ломаем), значения настроек — settings_screen.py (фаза
+    WAIT_SETTING_VALUE, группа 2). Регистрируется в ОТДЕЛЬНОЙ группе PTB
+    (group=1): MessageHandler backfill.py (группа 0) вне фазы диалога
+    молчит, и обновление доходит и до него, и до этого обработчика.
     """
     from src.handlers import events, hint, settings_screen, undo  # лениво: events/undo импортируют common
 
     message = update.effective_message
     text = message.text if message is not None else None
-    if text is None or (
-        text not in state.REPLY_BUTTONS and text != settings_screen.BTN_SETTINGS
-    ):
+    if text is None or text not in state.REPLY_BUTTONS:
         return
     if update.effective_user is None:
         return
@@ -162,8 +168,13 @@ async def reply_button_message(
         if text == state.BTN_HINT:
             await hint.reply_hint_button(update, context, conn, user)
             return
-        if text == settings_screen.BTN_SETTINGS:
+        if text == state.BTN_SETTINGS:
             await settings_screen.reply_settings_button(update, context, conn, user)
+            return
+        if text == state.BTN_HISTORY:
+            # Маршрут текста → логика колбэка history:week подключается в
+            # задаче 2.1 (handlers/history.py вне зоны 2.0); сейчас — без
+            # действия и без записи (см. докстринг).
             return
         kind = state.kind_of_button(text)
         if kind is not None:

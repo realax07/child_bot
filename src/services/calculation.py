@@ -270,18 +270,12 @@ class DailySummary:
         total_sleep: суммарный сон страницы — durations интервалов,
             отнесённых к странице по моменту начала (design D8),
             целиком, без обрезки по границе окна.
-        total_wake: суммарное бодрствование внутри окна страницы
-            (day_start → day_start следующего дня): окно минус
-            фактическое покрытие сном (сквозные интервалы обрезаются
-            по границе окна — бодрствование это фактическое время
-            без сна внутри окна).
         sleep_intervals: интервалы сна, отнесённые к странице
             (после склейки), в хронологическом порядке.
     """
 
     page_date: date
     total_sleep: timedelta
-    total_wake: timedelta
     sleep_intervals: tuple[SleepInterval, ...]
 
 
@@ -299,9 +293,7 @@ def daily_summary(
     создаёт хранимых агрегатов (FR-3, ТЗ §9.5). Сон после склейки
     относится к странице дня по моменту НАЧАЛА сна (design D8) и
     учитывается целиком — ночной сон через полночь целиком в странице
-    дня начала. Бодрствование — фактическое время без сна внутри окна
-    страницы (day_start → day_start следующего дня): короткое
-    пробуждение, склеенное порогом, бодрствование не создаёт (FR-14).
+    дня начала.
 
     Args:
         events: сырые пары (event_type, timestamp) — 'sleep' / 'wake',
@@ -316,9 +308,6 @@ def daily_summary(
     Returns:
         DailySummary для страницы page_date.
     """
-    window_start = datetime.combine(page_date, day_start)
-    window_end = _day_page_end(page_date, day_start)
-
     merged = merge_intervals(
         build_sleep_intervals(events, now_local=now_local, day_start=day_start),
         merge_threshold_min,
@@ -331,18 +320,9 @@ def daily_summary(
     )
     total_sleep = sum((interval.duration for interval in attributed), timedelta())
 
-    covered = timedelta()
-    for interval in merged:
-        overlap_start = max(interval.start_local, window_start)
-        overlap_end = min(interval.end_local, window_end)
-        if overlap_end > overlap_start:
-            covered += overlap_end - overlap_start
-    total_wake = (window_end - window_start) - covered
-
     return DailySummary(
         page_date=page_date,
         total_sleep=total_sleep,
-        total_wake=total_wake,
         sleep_intervals=attributed,
     )
 

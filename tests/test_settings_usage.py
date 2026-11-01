@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from collections import Counter
+from dataclasses import fields as dataclass_fields
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -41,7 +42,12 @@ from src.handlers import backfill
 from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.repositories.settings import SettingsRepo
 from src.repositories.sleep_events import SleepEventsRepo
-from src.services.calculation import classify_sleep, daily_summary, sleep_page
+from src.services.calculation import (
+    DailySummary,
+    classify_sleep,
+    daily_summary,
+    sleep_page,
+)
 from src.services.event import get_user
 from src.services.settings import SettingsService
 
@@ -157,8 +163,7 @@ def test_tc_setu_001_merge_threshold_from_settings_changes_summary_not_events(
     assert _raw_snapshot(repo.list_by_user(user["id"])) == snapshot
 
     # Повторный расчёт с тем же кодом чтения даёт ДРУГОЙ результат:
-    # 15-минутное пробуждение больше порога 5 — два отдельных сна,
-    # пробуждение 15 мин попадает в бодрствование (FR-14).
+    # 15-минутное пробуждение больше порога 5 — два отдельных сна (FR-14).
     after = daily_summary(
         _events_from_db(repo.list_by_user(user["id"])),
         page_date=datetime(2026, 10, 10).date(),
@@ -166,7 +171,13 @@ def test_tc_setu_001_merge_threshold_from_settings_changes_summary_not_events(
     )
     assert len(after.sleep_intervals) == 2
     assert after.total_sleep == timedelta(hours=1, minutes=45)
-    assert after.total_wake == before.total_wake + timedelta(minutes=15)
+    # Наследие TC-SETU-001: DailySummary.total_wake удалён (п.в техдолга
+    # 1.3, решение D8 «сумма сна/бодрствования за день смысла не имеет» —
+    # по ТЗ показывается только текущее бодрствование). Поле больше
+    # НЕ существует в DailySummary.
+    assert not any(
+        field.name == "total_wake" for field in dataclass_fields(DailySummary)
+    )
 
     # И после смены порога записи по-прежнему идентичны.
     assert _raw_snapshot(repo.list_by_user(user["id"])) == snapshot

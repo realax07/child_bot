@@ -15,6 +15,7 @@ import sys
 from datetime import date, datetime, time, timedelta
 
 from src.services.calculation import (
+    anchor_conflicts,
     day_facts_lines,
     nap_end_after_deadline,
     nap_end_forecast,
@@ -230,11 +231,12 @@ def test_tc_rec_009_total_wake_matches_pb3_fact_unified_arithmetic() -> None:
 
 
 def test_tc_rec_010_night_window_reaches_lower_bound_at_2215() -> None:
-    """TC-REC-010 (FR-30, §4.5 з2): окно ухода при достижении 12 ч
-    в 22:15. Подъем 08:00, дневной сон 13:00–15:15 (2:15), момент
-    20:15 → бодрствование 10 ч, нижняя граница 12,0 ч достигается в
-    22:15 — внутри якорей: окно ухода 22:00–22:30 (целевое 22:00),
-    без флага «позже 22:30».
+    """TC-REC-010 (FR-30 в ред. ОВ-4.2, §4.5 з2): рекомендация ухода
+    при достижении 12 ч 10 мин в границах окна. Подъем 08:00, дневной
+    сон 13:00–15:15 (2:15), момент 20:15 → бодрствование 10 ч,
+    нижняя граница 12 ч 10 мин достигается в 22:25 — внутри якорей
+    22:00–22:30: рекомендация — сам момент 22:25, без флага
+    «позже 22:30».
     """
     events = _night_rise_at(8, 0) + [
         ("sleep", _dt(3, 13, 0)),
@@ -243,19 +245,21 @@ def test_tc_rec_010_night_window_reaches_lower_bound_at_2215() -> None:
 
     window = night_window(events, _dt(3, 20, 15))
     assert window.wake_total == timedelta(hours=10)
-    assert window.reach_lower == _dt(3, 22, 15)
+    assert window.reach_lower == _dt(3, 22, 25)
     assert window.reach_upper == _dt(3, 22, 45)
     assert window.target == _dt(3, 22, 0)
     assert window.deadline == _dt(3, 22, 30)
+    assert window.recommended == _dt(3, 22, 25)
     assert window.later_than_deadline is False
 
 
 def test_tc_rec_011_night_window_later_than_deadline_flags_warning() -> None:
-    """TC-REC-011 (FR-30): расчётное достижение нижней границы ПОЗЖЕ
-    крайнего ухода — флаг предупреждения «ночной сон может сдвинуться»
-    (текст §7.24 — волна 2). Длинный дневной сон 13:00–16:00 (3:00),
-    момент 22:00 → бодрствование 11 ч, граница 12,0 ч достигается в
-    23:00 — позже 22:30.
+    """TC-REC-011 (FR-30 в ред. ОВ-4.2): достижение 12 ч 10 мин СТРОГО
+    позже крайнего ухода — флаг предупреждения «ночной сон может
+    сдвинуться» (текст §7.24 — волна 2). Длинный дневной сон
+    13:00–16:00 (3:00), момент 22:00 → бодрствование 11 ч, граница
+    12 ч 10 мин достигается в 23:10 — позже 22:30; рекомендация — сам
+    момент достижения 23:10 (уход, как только граница набрана).
     """
     events = _night_rise_at(8, 0) + [
         ("sleep", _dt(3, 13, 0)),
@@ -264,31 +268,35 @@ def test_tc_rec_011_night_window_later_than_deadline_flags_warning() -> None:
 
     window = night_window(events, _dt(3, 22, 0))
     assert window.wake_total == timedelta(hours=11)
-    assert window.reach_lower == _dt(3, 23, 0)
+    assert window.reach_lower == _dt(3, 23, 10)
     assert window.deadline == _dt(3, 22, 30)
+    assert window.recommended == _dt(3, 23, 10)
     assert window.later_than_deadline is True
 
 
 def test_tc_rec_012_night_window_below_range_far_from_window() -> None:
-    """TC-REC-012 (FR-30): суммарное бодрствование НИЖЕ диапазона —
-    до окна далеко, флага нет. Подъем 08:00 без дневного сна, момент
-    12:00 → 4 ч бодрствования; 12,0 ч достигается в 20:00 (до 22:30),
-    12,5 ч — в 20:30.
+    """TC-REC-012 (FR-30 в ред. ОВ-4.2): суммарное бодрствование НИЖЕ
+    ночного окна — до ухода далеко, рекомендация = целевой якорь 22:00
+    (раньше уходить при ненабранном бодрствовании нельзя), флага нет.
+    Подъем 08:00 без дневного сна, момент 12:00 → 4 ч; 12 ч 10 мин
+    достигаются в 20:10 (до 22:30), 12,5 ч — в 20:30.
     """
     window = night_window(_night_rise_at(8, 0), _dt(3, 12, 0))
 
     assert window.wake_total == timedelta(hours=4)
-    assert window.reach_lower == _dt(3, 20, 0)
+    assert window.reach_lower == _dt(3, 20, 10)
     assert window.reach_upper == _dt(3, 20, 30)
+    assert window.recommended == _dt(3, 22, 0)
     assert window.later_than_deadline is False
 
 
 def test_tc_rec_013_night_window_above_range_window_is_now() -> None:
-    """TC-REC-013 (FR-30/FR-36): суммарное бодрствование ВЫШЕ верхней
-    границы — окно уже прошло/сейчас. Подъем 08:00, дневной сон
-    13:00–15:00 (2:00), момент 23:00 → 13 ч (> 12,5): моменты
-    достижения = момент расчёта (проекция не уходит в прошлое),
-    уход просрочен — флаг «позже 22:30» (перегул §7.9 — волна 2).
+    """TC-REC-013 (FR-30 в ред. ОВ-4.2/FR-36): суммарное бодрствование
+    ВЫШЕ верхней границы — окно уже прошло/сейчас. Подъем 08:00,
+    дневной сон 13:00–15:00 (2:00), момент 23:00 → 13 ч (> 12,5):
+    моменты достижения = момент расчёта (проекция не уходит в прошлое),
+    рекомендация 23:00, уход просрочен — флаг «позже 22:30» (перегул
+    §7.9 — волна 2).
     """
     events = _night_rise_at(8, 0) + [
         ("sleep", _dt(3, 13, 0)),
@@ -299,6 +307,7 @@ def test_tc_rec_013_night_window_above_range_window_is_now() -> None:
     assert window.wake_total == timedelta(hours=13)
     assert window.reach_lower == _dt(3, 23, 0)
     assert window.reach_upper == _dt(3, 23, 0)
+    assert window.recommended == _dt(3, 23, 0)
     assert window.later_than_deadline is True
 
 
@@ -323,11 +332,14 @@ def test_tc_rec_014_unclosed_night_sleep_freezes_wake_end() -> None:
 
 
 def test_tc_rec_015_night_window_anchors_from_settings_dict() -> None:
-    """TC-REC-015 (FR-24, design D14): границы диапазона и якоря ночи
-    читаются из переданных настроек при каждом расчёте — смена
-    wake_total_min (12,0 → 11,5) сдвигает момент достижения,
-    night_deadline («22:30» → «23:00») снимает флаг TC-REC-011,
-    night_target («22:00» → «21:30») меняет целевой якорь.
+    """TC-REC-015 (FR-24, design D14): якорь нижней границы ночного
+    окна и якоря ночи читаются из переданных настроек при каждом
+    расчёте — смена night_wake_min (730 → 690, т.е. 12 ч 10 мин →
+    11 ч 30 мин) сдвигает момент достижения и снимает флаг TC-REC-011,
+    night_deadline («22:30» → «23:30») снимает флаг, night_target
+    («22:00» → «21:30») меняет целевой якорь, а засеянный пакетом 1
+    wake_total_min = 12.0 рекомендацию ОВ-4.2 НЕ меняет (ключ
+    night_wake_min в DEFAULT_KEYS отсутствует — затенения нет).
     """
     events = _night_rise_at(8, 0) + [
         ("sleep", _dt(3, 13, 0)),
@@ -335,25 +347,36 @@ def test_tc_rec_015_night_window_anchors_from_settings_dict() -> None:
     ]
 
     lower_bound = night_window(
-        events, _dt(3, 22, 0), {"wake_total_min": 11.5}
+        events, _dt(3, 22, 0), {"night_wake_min": 690}
     )
     assert lower_bound.wake_total == timedelta(hours=11)
     assert lower_bound.reach_lower == _dt(3, 22, 30)
+    assert lower_bound.recommended == _dt(3, 22, 30)
     assert lower_bound.later_than_deadline is False
 
-    later_limit = night_window(events, _dt(3, 22, 0), {"night_deadline": "23:00"})
-    assert later_limit.deadline == _dt(3, 23, 0)
+    later_limit = night_window(events, _dt(3, 22, 0), {"night_deadline": "23:30"})
+    assert later_limit.deadline == _dt(3, 23, 30)
     assert later_limit.later_than_deadline is False
 
     earlier_target = night_window(events, _dt(3, 22, 0), {"night_target": "21:30"})
     assert earlier_target.target == _dt(3, 21, 30)
+    assert earlier_target.recommended == _dt(3, 23, 10)
+
+    seeded_old_key = night_window(events, _dt(3, 22, 0), {"wake_total_min": 12.0})
+    assert seeded_old_key.reach_lower == _dt(3, 23, 10)
+    assert seeded_old_key.later_than_deadline is True
 
 
 def test_tc_rec_016_night_defaults_mirror_settings_default_keys() -> None:
-    """TC-REC-016 (design D14/D16): аргументные дефолты total_wake_at /
-    night_window — зеркало DEFAULT_KEYS пакета 1 (единый источник;
-    прямой импорт DEFAULT_KEYS в calculation запрещён — соответствие
-    фиксирует ЭТОТ тест).
+    """TC-REC-016 (design D14/D16 + ОВ-4.2): аргументные дефолты
+    total_wake_at / night_window — зеркало DEFAULT_KEYS пакета 1,
+    КРОМЕ нижней границы ночного окна: по решению продакта ОВ-4.2
+    (31.10) она = 12 ч 10 мин (night_wake_min, 730 мин), а не 12,0 ч;
+    ключа night_wake_min в DEFAULT_KEYS нет, поэтому засеянный
+    wake_total_min = 12.0 дефолт не затеняет. Верхняя граница
+    wake_total_max — по-прежнему зеркало DEFAULT_KEYS (12,5 ч); прямой
+    импорт DEFAULT_KEYS в calculation запрещён — соответствие фиксирует
+    ЭТОТ тест.
     """
     wake_params = total_wake_at.__kwdefaults__
     assert wake_params is not None, "keyword-only дефолты total_wake_at ожидаемы"
@@ -363,9 +386,10 @@ def test_tc_rec_016_night_defaults_mirror_settings_default_keys() -> None:
 
     night_params = night_window.__kwdefaults__
     assert night_params is not None, "keyword-only дефолты night_window ожидаемы"
-    assert night_params["wake_total_min_h"] == DEFAULT_KEYS["wake_total_min"]
+    assert night_params["night_wake_min_min"] == 730  # 12 ч 10 мин, ОВ-4.2
+    assert "night_wake_min" not in DEFAULT_KEYS  # seeded-ключ не затеняет
+    assert DEFAULT_KEYS["wake_total_min"] == 12.0  # факт диапазона пакета 1
     assert night_params["wake_total_max_h"] == DEFAULT_KEYS["wake_total_max"]
-    assert night_params["wake_total_min_h"] == 12.0
     assert night_params["wake_total_max_h"] == 12.5
     assert night_params["night_target"] == time(22, 0)
     assert night_params["night_deadline"] == time(22, 30)
@@ -373,3 +397,140 @@ def test_tc_rec_016_night_defaults_mirror_settings_default_keys() -> None:
     assert str(DEFAULT_KEYS["night_deadline"]) == "22:30"
     assert night_params["merge_threshold_min"] == DEFAULT_KEYS["merge_threshold"]
     assert night_params["day_start"] == time(6, 0)
+
+
+def test_tc_rec_017_reach_before_target_recommends_exact_target() -> None:
+    """TC-REC-017 (FR-30 в ред. ОВ-4.2): 12 ч 10 мин достигаются
+    РАНЬШЕ целевого якоря — рекомендация ровно 22:00, без флага
+    (уход раньше ночного якоря при набранном бодрствовании не нужен).
+    Подъем 08:00 без дневного сна, момент 21:00 → бодрствование 13 ч
+    (граница в момент расчёта), рекомендация 22:00.
+    """
+    window = night_window(_night_rise_at(8, 0), _dt(3, 21, 0))
+
+    assert window.wake_total == timedelta(hours=13)
+    assert window.reach_lower == _dt(3, 21, 0)
+    assert window.recommended == _dt(3, 22, 0)
+    assert window.later_than_deadline is False
+
+
+def test_tc_rec_018_exact_reach_at_deadline_no_flag_strictly_later() -> None:
+    """TC-REC-018 (FR-30 в ред. ОВ-4.2): граница «позже 22:30» —
+    СТРОГАЯ. Подъем 08:00, дневной сон 13:00–15:20 (2:20), момент
+    22:30 → бодрствование ровно 12 ч 10 мин в 22:30: рекомендация
+    22:30 БЕЗ флага; через минуту (22:31) — уже СТРОГО позже: флаг.
+    И кейс достижения в 23:00: сон 13:00–15:50 (2:50), момент 22:00 →
+    11 ч 10 мин, 12 ч 10 мин в 23:00 — позже 22:30: флаг,
+    рекомендация 23:00.
+    """
+    exact = night_window(
+        _night_rise_at(8, 0)
+        + [("sleep", _dt(3, 13, 0)), ("wake", _dt(3, 15, 20))],
+        _dt(3, 22, 30),
+    )
+    assert exact.wake_total == timedelta(hours=12, minutes=10)
+    assert exact.reach_lower == _dt(3, 22, 30)
+    assert exact.recommended == _dt(3, 22, 30)
+    assert exact.later_than_deadline is False
+
+    minute_later = night_window(
+        _night_rise_at(8, 0)
+        + [("sleep", _dt(3, 13, 0)), ("wake", _dt(3, 15, 20))],
+        _dt(3, 22, 31),
+    )
+    assert minute_later.reach_lower == _dt(3, 22, 31)
+    assert minute_later.later_than_deadline is True
+
+    at_2300 = night_window(
+        _night_rise_at(8, 0)
+        + [("sleep", _dt(3, 13, 0)), ("wake", _dt(3, 15, 50))],
+        _dt(3, 22, 0),
+    )
+    assert at_2300.wake_total == timedelta(hours=11, minutes=10)
+    assert at_2300.reach_lower == _dt(3, 23, 0)
+    assert at_2300.recommended == _dt(3, 23, 0)
+    assert at_2300.later_than_deadline is True
+
+
+def test_tc_rec_019_rise_1000_conflict_with_compromise() -> None:
+    """TC-REC-019 (FR-31, design D18, §4.5 з3): подъём 10:00 →
+    конфликт «конец сна позже 15:30» с принятым компромиссом. Окно
+    15:20–16:00, прогноз конца 16:50 позже 15:30; допустимое начало
+    (15:30 − 1:30 = 14:00) раньше начала окна — дневное окно
+    несовместимо, жертвуется (приоритет 15:30 выше дневного окна):
+    сдвигается «дневное окно», принято «будить не позже 15:30»,
+    предложение — крайнее пробуждение 15:30. Ночной якорь не конфликтует
+    (12 ч 10 мин при подъёме 10:00 без дневного сна достигаются в
+    22:10 ≤ 22:30) — конфликт ровно один.
+    """
+    conflicts = anchor_conflicts(_night_rise_at(10, 0), _dt(3, 15, 20))
+
+    assert len(conflicts) == 1
+    conflict = conflicts[0]
+    assert conflict.conflicting == ("15:30", "дневное окно")
+    assert conflict.shifted == "дневное окно"
+    assert "несовместимо" in conflict.accepted
+    assert "15:30" in conflict.accepted
+    assert conflict.latest_nap_end == _dt(3, 15, 30)
+
+
+def test_tc_rec_020_late_rise_night_2200_incompatible_with_proposal() -> None:
+    """TC-REC-020 (FR-31, design D18): поздний подъём 10:00 + уход
+    22:00–22:30 — несовместимо с предложением. Дневной сон 15:20–17:00
+    (1:40), момент 17:00 → бодрствование 5 ч 20 мин; 12 ч 10 мин
+    достигаются в 23:50 — позже 22:30. Приоритет НОЧЬ выше всех:
+    сдвигается «дневное окно», принято «уход в ночь 22:00–22:30»,
+    предложение (будить не позже 15:40) уже в прошлом → latest_nap_end
+    None + предупреждение о сдвиге ночи. Конфликт с 15:30 (сон начат
+    в 15:20, конец по правилам окна 16:50) докладывается отдельным
+    элементом списка.
+    """
+    events = _night_rise_at(10, 0) + [
+        ("sleep", _dt(3, 15, 20)),
+        ("wake", _dt(3, 17, 0)),
+    ]
+
+    conflicts = anchor_conflicts(events, _dt(3, 17, 0))
+
+    assert len(conflicts) == 2
+    night_conflict = conflicts[1]
+    assert night_conflict.conflicting == ("ночь", "дневное окно")
+    assert night_conflict.shifted == "дневное окно"
+    assert "22:00" in night_conflict.accepted
+    assert "22:30" in night_conflict.accepted
+    assert "невозможна" in night_conflict.accepted
+    assert night_conflict.latest_nap_end is None
+    # Конфликт с 15:30 — первым по фиксированному порядку отчёта.
+    assert conflicts[0].conflicting == ("15:30", "дневное окно")
+
+
+def test_tc_rec_021_same_input_same_result_deterministic() -> None:
+    """TC-REC-021 (FR-31, детерминированность design D18): один и тот
+    же набор событий и настроек, поданный на проверку дважды, даёт
+    идентичные результат проверки и предложенный компромисс — ночное
+    окно и список конфликтов попарно равны.
+    """
+    events = _night_rise_at(10, 0) + [
+        ("sleep", _dt(3, 15, 20)),
+        ("wake", _dt(3, 17, 0)),
+    ]
+    settings = {"target_nap_duration": 90}
+
+    first_night = night_window(events, _dt(3, 17, 0), settings)
+    second_night = night_window(events, _dt(3, 17, 0), settings)
+    assert first_night == second_night
+
+    first = anchor_conflicts(events, _dt(3, 17, 0), settings)
+    second = anchor_conflicts(events, _dt(3, 17, 0), settings)
+    assert first == second
+
+    # И совместимый день детерминирован: пустой список конфликтов
+    # при повторном прогоне тоже идентичен.
+    calm = _night_rise_at(8, 0) + [
+        ("sleep", _dt(3, 13, 0)),
+        ("wake", _dt(3, 15, 15)),
+    ]
+    assert anchor_conflicts(calm, _dt(3, 20, 15)) == anchor_conflicts(
+        calm, _dt(3, 20, 15)
+    )
+    assert anchor_conflicts(calm, _dt(3, 20, 15)) == []

@@ -894,38 +894,56 @@ def nap_window(
 
 # ---------------------------------------------------------------------------
 # Суммарное бодрствование и окно ночного сна (add-recommendations, задача
-# 1.2; design D16; ТЗ §4.5 задача 2, §3.3, §3.4; FR-29, FR-30;
-# research A3/A4).
+# 1.2 + доработка ОВ-4.2 от 31.10; design D16; ТЗ §4.5 задача 2, §3.3,
+# §3.4; FR-29, FR-30 в ред. ОВ-4.2; FR-40; research A3/A4).
 #
 # Арифметика бодрствования — ТОЛЬКО через `_bug004_total_wake` (единая
-# с фактом PB-3; вторая реализация формулы BUG-004 запрещена). Границы
-# диапазона и якоря ночи — из переданных настроек (design D14: ключи
-# wake_total_min / wake_total_max / night_target / night_deadline
-# пакета 1); дефолты — аргументные (= значения ТЗ §5 = DEFAULT_KEYS;
+# с фактом PB-3; вторая реализация формулы BUG-004 запрещена). Якоря
+# ночи — из переданных настроек (design D14: смена настройки меняет
+# окна без релиза); дефолты — аргументные (= значения в ред. ОВ-4.2;
 # прямой импорт DEFAULT_KEYS в calculation запрещён — соответствие
 # фиксирует тест TC-REC-016).
+#
+# Решение ОВ-4.2 (продакт, 31.10): рекомендованное время ухода =
+# max(night_target, момент достижения нижней границы ночного окна),
+# нижняя граница ночного окна = 12 ч 10 мин (не 12,0 ч) — бот
+# рекомендует КОНКРЕТНОЕ время ухода в сон. Якорь нижней границы —
+# настройка night_wake_min (минуты; в DEFAULT_KEYS пакета 1 ключа нет,
+# поэтому засеянный в БД wake_total_min = 12.0 НЕ затеняет новый
+# дефолт: SettingsService.get_all возвращает только ключи DEFAULT_KEYS,
+# расчёт без явного переопределения получает 12 ч 10 мин). Достижение
+# нижней границы СТРОГО позже night_deadline — флаг предупреждения.
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class NightWindow:
-    """Окно ухода в ночь: расчёт от суммарного бодрствования (FR-30).
+    """Окно ухода в ночь: конкретная рекомендация от бодрствования
+    (FR-30 в ред. ОВ-4.2).
 
     Attributes:
         wake_total: суммарное бодрствование на момент расчёта (единая
             формула BUG-004 с фактом PB-3 — `total_wake_at`).
-        reach_lower: расчётный момент достижения НИЖНЕЙ границы
-            бодрствования (настройка wake_total_min, дефолт 12,0 ч);
-            граница уже достигнута — момент расчёта («окно сейчас»).
+        reach_lower: расчётный момент достижения НИЖНЕЙ границы ночного
+            окна (настройка night_wake_min, дефолт 12 ч 10 мин —
+            ОВ-4.2); граница уже достигнута — момент расчёта
+            («окно сейчас»).
         reach_upper: расчётный момент достижения ВЕРХНЕЙ границы
             (wake_total_max, дефолт 12,5 ч); аналогично.
         target: якорь целевого ухода в ночь (настройка night_target,
             дефолт 22:00) в дату страницы момента расчёта.
         deadline: якорь крайнего ухода в ночь (настройка
             night_deadline, дефолт 22:30) в ту же дату.
-        later_than_deadline: True — расчётное достижение нижней
-            границы ПОЗЖЕ крайнего ухода (предупреждение FR-30:
-            «ночной сон может сдвинуться» — текст в волне 2).
+        recommended: КОНКРЕТНОЕ рекомендованное время ухода
+            (ОВ-4.2) = max(target, reach_lower): граница 12 ч 10 мин
+            достигается раньше 22:00 — рекомендуем ровно 22:00 (уход
+            раньше ночного якоря при набранном бодрствовании не
+            нужен); позже — сам момент достижения (уход, как только
+            граница набрана). Границы 22:00–22:30 — обычный случай.
+        later_than_deadline: True — достижение нижней границы СТРОГО
+            позже крайнего ухода (предупреждение FR-30: «ночной сон
+            может сдвинуться» — текст в волне 2); ровно в night_deadline
+            — ещё нет (строгое «позже», ОВ-4.2).
     """
 
     wake_total: timedelta
@@ -933,6 +951,7 @@ class NightWindow:
     reach_upper: datetime
     target: datetime
     deadline: datetime
+    recommended: datetime
     later_than_deadline: bool
 
 
@@ -1005,36 +1024,48 @@ def night_window(
     merge_threshold_min: int = 20,
     bedtime_from: time = time(19, 0),
     rise_until: time = time(12, 0),
-    wake_total_min_h: float = 12.0,
+    night_wake_min_min: int = 730,
     wake_total_max_h: float = 12.5,
     night_target: time = time(22, 0),
     night_deadline: time = time(22, 30),
 ) -> NightWindow:
-    """Окно ухода в ночь от суммарного бодрствования (FR-30; ТЗ §4.5
-    задача 2, §3.3, §3.4; design D16; research A3/A4).
+    """Конкретная рекомендация ухода в ночь от бодрствования (FR-30 в
+    ред. ОВ-4.2; ТЗ §4.5 задача 2, §3.3, §3.4; design D16; research
+    A3/A4).
 
     Сравнение `total_wake_at` (единая формула BUG-004) с границами
-    12,0–12,5 ч: расчётный момент достижения границы — проекция
-    «бодрствование накапливается 1:1, будущих событий нет» (как прогноз
-    конца дневного сна — уточняется при следующем событии; корректна
-    при бодрствовании на момент расчёта). Окно ухода показывается
-    ЯКОРЯМИ night_target–night_deadline (дефолты 22:00–22:30) в дату
-    страницы момента расчёта; достижение нижней границы позже
-    night_deadline — флаг предупреждения (FR-30, «ночной сон может
-    сдвинуться»; текст — волна 2). Позиция к диапазону (ниже/в/выше —
-    §4.6) различается моментами reach_lower/reach_upper против
-    now_local.
+    ночного окна: нижняя — 12 ч 10 мин (ОВ-4.2, настройка
+    night_wake_min), верхняя — 12,5 ч (wake_total_max). Расчётный
+    момент достижения границы — проекция «бодрствование накапливается
+    1:1, будущих событий нет» (как прогноз конца дневного сна —
+    уточняется при следующем событии; корректна при бодрствовании на
+    момент расчёта). РЕКОМЕНДОВАННОЕ время ухода (решение продакта
+    ОВ-4.2, 31.10: «конкретное время ухода в сон… бодрствование
+    не меньше 12 ч 10 мин») = max(night_target, reach_lower):
+      - 12 ч 10 мин набираются РАНЬШЕ 22:00 → рекомендуем ровно
+        night_target (22:00) — раньше уходить при набранном
+        бодрствовании не нужно;
+      - в границах 22:00–22:30 → сам момент достижения;
+      - достижение СТРОГО позже night_deadline (22:30) → та же
+        рекомендация + флаг later_than_deadline (предупреждение FR-30
+        «ночной сон может сдвинуться»; текст — волна 2). Ровно в
+        22:30 — рекомендации 22:30 БЕЗ флага (строгое «позже»).
+    Позиция к диапазону (ниже/в/выше — §4.6) различается моментами
+    reach_lower/reach_upper против now_local.
 
     Args:
         events: сырые пары (event_type, timestamp), naive, любой порядок.
         now_local: момент расчёта, naive datetime в TZ пользователя.
-        settings: настройки пользователя (dict) или None — дефолты ТЗ §5.
+        settings: настройки пользователя (dict) или None — дефолты
+            (в ред. ОВ-4.2; ключ night_wake_min можно переопределить
+            в dict, в DEFAULT_KEYS его нет — засеянный wake_total_min
+            = 12.0 нижнюю границу рекомендации НЕ меняет).
         day_start: граница страницы дня (настройка day_start, 06:00).
         merge_threshold_min: порог склейки (настройка merge_threshold).
         bedtime_from: вечерняя граница факта «Отбой» (из night_bounds).
         rise_until: утренняя граница факта «Подъем».
-        wake_total_min_h: дефолт нижней границы бодрствования, ч
-            (настройка wake_total_min — 12,0).
+        night_wake_min_min: дефолт нижней границы ночного окна, мин
+            (настройка night_wake_min — 12 ч 10 мин, ОВ-4.2).
         wake_total_max_h: дефолт верхней границы бодрствования, ч
             (настройка wake_total_max — 12,5).
         night_target: дефолт целевого ухода в ночь (настройка
@@ -1043,7 +1074,8 @@ def night_window(
             night_deadline — 22:30).
 
     Returns:
-        NightWindow для страницы дня момента расчёта.
+        NightWindow с рекомендацией `recommended` для страницы дня
+        момента расчёта.
     """
     wake_total = total_wake_at(
         events,
@@ -1054,8 +1086,12 @@ def night_window(
         bedtime_from=bedtime_from,
         rise_until=rise_until,
     )
-    min_wake = timedelta(hours=_as_hours(
-        _setting_value(settings, "wake_total_min", wake_total_min_h)
+    # Нижняя граница НОЧНОГО окна — 12 ч 10 мин (ОВ-4.2): якорь
+    # night_wake_min в settings-dict, дефолт — аргументный (не литерал
+    # в теле); ключ в DEFAULT_KEYS отсутствует, поэтому seeded
+    # wake_total_min = 12.0 не затеняет решение продакта.
+    min_wake = timedelta(minutes=_as_minutes(
+        _setting_value(settings, "night_wake_min", night_wake_min_min)
     ))
     max_wake = timedelta(hours=_as_hours(
         _setting_value(settings, "wake_total_max", wake_total_max_h)
@@ -1074,11 +1110,196 @@ def night_window(
         page_date,
         _as_hhmm(_setting_value(settings, "night_deadline", night_deadline)),
     )
+    # ОВ-4.2: рекомендация = max(22:00, момент достижения 12 ч 10 мин);
+    # строго позже 22:30 — предупреждение.
+    recommended = max(target, reach_lower)
     return NightWindow(
         wake_total=wake_total,
         reach_lower=reach_lower,
         reach_upper=reach_upper,
         target=target,
         deadline=deadline,
+        recommended=recommended,
         later_than_deadline=reach_lower > deadline,
     )
+
+
+# ---------------------------------------------------------------------------
+# Конфликты якорей — проверка реалистичности и честный компромисс
+# (add-recommendations, задача 1.3; design D18; ТЗ §4.5 задача 3,
+# §3.6; FR-31; research A5–A7).
+#
+# Проверки реалистичности (детерминированные, вход — те же сырые
+# события + настройки + момент расчёта):
+#   1) подъём + окно дневного сна → прогноз конца сна vs 15:30
+#      (nap_window.after_deadline);
+#   2) конец сна + остаток вечернего бодрствования → момент
+#      достижения нижней границы ночного окна (12 ч 10 мин, ОВ-4.2)
+#      vs крайний уход 22:30 (night_window.later_than_deadline).
+# Правило компромисса ФИКСИРОВАНО (design D18): приоритет якорей
+# НОЧЬ > 15:30 > дневное окно — ночной сон главный якорь режима,
+# поэтому сдвигается всегда якорь НИЗШЕГО приоритета из конфликтующих
+# (дневное окно). Одинаковый вход даёт одинаковый результат.
+# ---------------------------------------------------------------------------
+
+
+#: Имена якорей в отчёте о конфликте (стабильные, для текстов волны 2.3).
+ANCHOR_NIGHT = "ночь"
+ANCHOR_WAKE_DEADLINE = "15:30"
+ANCHOR_NAP_WINDOW = "дневное окно"
+
+
+@dataclass(frozen=True)
+class AnchorConflict:
+    """Один конфликт якорей с детерминированным компромиссом (FR-31).
+
+    Attributes:
+        conflicting: имена противоречащих якорей (первым — якорь
+            более высокого приоритета, который остаётся).
+        shifted: какой якорь сдвигается (низший приоритет из
+            конфликтующих — по D18 всегда «дневное окно»).
+        accepted: какое окно принято компромиссом (готовая
+            формулировка с якорями-временами).
+        latest_nap_end: предложение компромисса — крайнее пробуждение
+            от дневного сна, при котором принятый якорь выполняется
+            (проекция «будущих снов нет»); компромисс уже неосуществим
+            (предложение в прошлом) — None.
+    """
+
+    conflicting: tuple[str, ...]
+    shifted: str
+    accepted: str
+    latest_nap_end: datetime | None
+
+
+def anchor_conflicts(
+    events: Iterable[tuple[str, datetime]],
+    now_local: datetime,
+    settings: Mapping[str, int | float | str] | None = None,
+    *,
+    day_start: time = DEFAULT_DAY_START,
+    merge_threshold_min: int = 20,
+    bedtime_from: time = time(19, 0),
+    rise_until: time = time(12, 0),
+    stretch_limit: time = time(13, 0),
+    sleep_min_before_nap_min: int = 320,
+    sleep_max_before_nap_min: int = 360,
+    target_nap_duration_min: int = 90,
+    wake_deadline: time = time(15, 30),
+    night_wake_min_min: int = 730,
+    wake_total_max_h: float = 12.5,
+    night_target: time = time(22, 0),
+    night_deadline: time = time(22, 30),
+) -> list[AnchorConflict]:
+    """Проверка реалистичности якорей и детерминированный компромисс
+    (FR-31; ТЗ §4.5 задача 3; design D18).
+
+    Чистая функция НАД теми же расчётами окон (`nap_window`,
+    `night_window` — без копий их арифметики). Возвращает СПИСОК
+    конфликтов: какие якоря противоречат, какой сдвигается, какое
+    окно принято. Пустой список — якоря совместимы, противоречивые
+    окна не выводятся (FR-31). Компромисс детерминирован фиксированным
+    приоритетом D18 — НОЧЬ > 15:30 > дневное окно: жертвой всегда
+    становится якорь низшего приоритета («дневное окно»):
+      - прогноз конца дневного сна позже 15:30 → сдвигается дневное
+        окно: принято «будить не позже 15:30» (допустимое начало сна
+        [окно.start; 15:30 − target]; окно целиком позже — несовместимо,
+        дневной сон сокращается/пропускается);
+      - момент достижения 12 ч 10 мин позже 22:30 (ОВ-4.2) → сдвигается
+        дневное окно: ночь сохраняется — принят уход
+        [night_target; night_deadline], предложение — будить от
+        дневного сна не позже deadline − (12 ч 10 мин − бодрствование);
+        предложение в прошлом (время упущено) — None с предупреждением
+        о сдвиге ночи (тот же флаг, что FR-30).
+
+    Args:
+        events: сырые пары (event_type, timestamp), naive, любой порядок.
+        now_local: момент расчёта, naive datetime в TZ пользователя.
+        settings: настройки пользователя (dict) или None — дефолты
+            (те же якоря, что у nap_window/night_window).
+        Остальные keyword-аргументы — дефолты якорей, зеркалят
+            nap_window / night_window (см. их докстринги).
+
+    Returns:
+        list[AnchorConflict] в фиксированном порядке: сначала конфликт
+        с якорем 15:30, затем с якорем ночи; пустой список — конфликтов
+        нет.
+    """
+    nap = nap_window(
+        events, now_local, settings,
+        day_start=day_start,
+        merge_threshold_min=merge_threshold_min,
+        bedtime_from=bedtime_from,
+        rise_until=rise_until,
+        stretch_limit=stretch_limit,
+        sleep_min_before_nap_min=sleep_min_before_nap_min,
+        sleep_max_before_nap_min=sleep_max_before_nap_min,
+        target_nap_duration_min=target_nap_duration_min,
+        wake_deadline=wake_deadline,
+    )
+    night = night_window(
+        events, now_local, settings,
+        day_start=day_start,
+        merge_threshold_min=merge_threshold_min,
+        bedtime_from=bedtime_from,
+        rise_until=rise_until,
+        night_wake_min_min=night_wake_min_min,
+        wake_total_max_h=wake_total_max_h,
+        night_target=night_target,
+        night_deadline=night_deadline,
+    )
+
+    conflicts: list[AnchorConflict] = []
+
+    # Конфликт 1: подъём + окно → конец сна позже 15:30 (приоритет
+    # 15:30 выше дневного окна — окно сдвигается/жертвуется).
+    if nap is not None and nap.after_deadline:
+        target_nap = nap.forecast_end - nap.start
+        latest_start = nap.wake_deadline - target_nap
+        if latest_start >= nap.start:
+            accepted = (
+                f"уход в дневной сон {nap.start:%H:%M}–{latest_start:%H:%M}, "
+                f"будить не позже {nap.wake_deadline:%H:%M}"
+            )
+        else:
+            accepted = (
+                f"дневное окно несовместимо с 15:30: сон начат позже "
+                f"{latest_start:%H:%M} — будить не позже "
+                f"{nap.wake_deadline:%H:%M}, дневной сон сокращается"
+            )
+        conflicts.append(AnchorConflict(
+            conflicting=(ANCHOR_WAKE_DEADLINE, ANCHOR_NAP_WINDOW),
+            shifted=ANCHOR_NAP_WINDOW,
+            accepted=accepted,
+            latest_nap_end=nap.wake_deadline,
+        ))
+
+    # Конфликт 2: конец сна + остаток вечернего бодрствования →
+    # достижение 12 ч 10 мин позже 22:30 (приоритет ночи выше всех —
+    # ночь сохраняется, дневное окно сдвигается).
+    if night.later_than_deadline:
+        night_min = timedelta(minutes=_as_minutes(
+            _setting_value(settings, "night_wake_min", night_wake_min_min)
+        ))
+        latest_nap_end = night.deadline - (night_min - night.wake_total)
+        feasible = latest_nap_end >= now_local
+        accepted = (
+            f"уход в ночь {night.target:%H:%M}–{night.deadline:%H:%M} "
+            f"(ночь — главный якорь), "
+            + (
+                f"будить от дневного сна не позже {latest_nap_end:%H:%M}"
+                if feasible
+                else (
+                    f"компенсация уже невозможна — предупреждение о сдвиге "
+                    f"ночного сна, уход не позже {night.deadline:%H:%M}"
+                )
+            )
+        )
+        conflicts.append(AnchorConflict(
+            conflicting=(ANCHOR_NIGHT, ANCHOR_NAP_WINDOW),
+            shifted=ANCHOR_NAP_WINDOW,
+            accepted=accepted,
+            latest_nap_end=latest_nap_end if feasible else None,
+        ))
+
+    return conflicts

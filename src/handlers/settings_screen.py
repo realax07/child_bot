@@ -39,8 +39,14 @@ from telegram.ext import ContextTypes
 
 from src import texts
 from src.handlers import common
+from src.handlers.events import (
+    CONFIRM_PAIR_KEY,
+    PENDING_KIND_KEY,
+    WAIT_EVENT_TIME_KEY,
+    WAIT_PAIR_SLEEP_KEY,
+    WAIT_PAIR_WAKE_KEY,
+)
 from src.handlers.backfill import CONFIRM_OVERWRITE_KEY
-from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
 from src.services.access import is_observer
 from src.services.event import get_user
 from src.services.settings import (
@@ -83,6 +89,12 @@ BACKFILL_PHASE_KEYS: tuple[str, ...] = (
     WAIT_EVENT_TIME_KEY,  # «ждём текстовый ввод времени» (events.py)
     PENDING_KIND_KEY,  # вид события диалога (events.py)
     CONFIRM_OVERWRITE_KEY,  # фаза подтверждения перезаписи §7.13 (backfill.py)
+    # Задача 3.1 (FR-51, design D23): фазы ПАРНОГО ввода — в том же
+    # взаимном исключении с настройками (обе стороны), что и остальные
+    # фазы группы 0; имена — из событий.py владельца, без копий (D14).
+    WAIT_PAIR_SLEEP_KEY,  # шаг 1 пары «Когда заснул?» (events.py)
+    WAIT_PAIR_WAKE_KEY,  # шаг 2 пары «Когда проснулся?» (events.py)
+    CONFIRM_PAIR_KEY,  # §7.13 пары: оба момента до решения (events.py)
 )
 
 # Состав экрана: группы §7.16 и их ключи (D14: имена — из DEFAULT_KEYS,

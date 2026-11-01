@@ -296,3 +296,84 @@ def detect_conflict(
             key=lambda ev: (_parse_utc(ev["timestamp"]), ev["id"]),
         )
     return None
+
+
+# --------------------------------- Единый конфликт-чек пары (3.1, FR-51)
+
+def detect_pair_conflict(
+    conn: sqlite3.Connection,
+    user_id: int,
+    sleep_utc: str,
+    wake_utc: str,
+) -> dict | None:
+    """ЕДИНЫЙ конфликт-чек ПАРЫ задним числом (задача 3.1, FR-51, D23).
+
+    Пара — интервал [sleep, wake]; проверяется ЦЕЛИКОМ, одним вызовом
+    (D23: «один конфликт-чек на пару»):
+      1) порядок внутри пары: wake <= sleep — отказ как конфликт (D23);
+         целью показывается засыпание ПАРЫ (id None — существующего
+         события нет, текст §7.13 тот же);
+      2) пересечение [sleep, wake] (границы включены — D11: «Проснулся
+         в 13:30» + «Заснул 13:40» на границе) с интервалами сна
+         пользователя (незакрытый тянется до момента расчёта, D9) —
+         и/или существующее событие ВНУТРИ пары (вставка пары вокруг
+         чужой записи разорвала бы хронологию sleep/wake).
+
+    Выбор цели — детерминированный D11-стиль: минимум расстояния момента
+    события до пары (0 — внутри), ничья — более раннее событие, затем id.
+    None — конфликта нет, ОБА события можно записывать как есть.
+
+    Существующие проверки (detect_conflict) НЕ меняются: парный ввод —
+    отдельная функция (санкция ПМ на 3.1: behavior существующих проверок
+    сохранён, event.py только дополняется).
+    """
+    s = _parse_utc(sleep_utc)
+    w = _parse_utc(wake_utc)
+    if w <= s:
+        # Порядок пары: пробуждение не позже засыпания — отказ как
+        # конфликт (D23); цель — засыпание самой пары.
+        return {"id": None, "event_type": KIND_SLEEP, "timestamp": sleep_utc}
+
+    events = SleepEventsRepo(conn).list_by_user(user_id)
+    if not events:
+        return None
+    now_utc = datetime.now(timezone.utc)
+
+    def _distance(ts: datetime) -> float:
+        """Расстояние момента до пары: 0 — внутри, иначе до границы."""
+        if s <= ts <= w:
+            return 0.0
+        return min(abs((ts - s).total_seconds()), abs((ts - w).total_seconds()))
+
+    candidates: list[tuple[dict, float]] = []
+    seen_ids: set[int] = set()
+
+    def _consider(ev: dict) -> None:
+        if ev["id"] in seen_ids:
+            return
+        seen_ids.add(ev["id"])
+        candidates.append((ev, _distance(_parse_utc(ev["timestamp"]))))
+
+    # 1) Пересечение интервала пары с интервалами сна (границы включены).
+    for i, ev in enumerate(events):
+        if ev["event_type"] != KIND_SLEEP:
+            continue
+        start, end, members = _interval_events(events, i, now_utc)
+        if start <= w and s <= end:
+            for member in members:
+                _consider(member)
+
+    # 2) Существующее событие внутри [sleep, wake] (в т.ч. на границе) —
+    # хронологию sleep/wake вставкой пары не меняем.
+    for ev in events:
+        ts = _parse_utc(ev["timestamp"])
+        if s <= ts <= w:
+            _consider(ev)
+
+    if not candidates:
+        return None
+    best = min(
+        candidates,
+        key=lambda c: (c[1], _parse_utc(c[0]["timestamp"]), c[0]["id"]),
+    )
+    return best[0]

@@ -73,6 +73,26 @@ PENDING_KIND_KEY = "pending_event_kind"
 # Задача 4.1 (FR-15): ветка «⏪ Ввести время вручную» — бот ждёт текстовый
 # ввод времени (§7.11); фаза читается обработчиком текста (backfill.py).
 WAIT_EVENT_TIME_KEY = "wait_event_time"
+#
+# Задача 3.1 (add-settings-history, FR-51, design D23): ПАРНЫЙ ввод сна
+# задним числом — ДВА ШАГА (решение продакта 01.11, ОВ-5.1). Вид «сон» +
+# «⏪ Ввести время вручную» ставит WAIT_EVENT_TIME как в ветке 4.1 ПЛЮС
+# маркер шага 1 (WAIT_PAIR_SLEEP_KEY) — по нему backfill.py ведёт ПАРНЫЙ
+# разбор; легаси-пробы фаз (без маркера) идут одиночной веткой, behavior
+# не меняется (санкция ПМ на 3.1). Разбор шага 1 ставит фазу шага 2
+# (WAIT_PAIR_WAKE_KEY), конфликт пары — CONFIRM_PAIR_KEY. Имена ключей —
+# единый источник здесь (design D14-стиль); settings_screen добавляет их
+# в BACKFILL_PHASE_KEYS (взаимное исключение с настройками в обе стороны).
+WAIT_PAIR_SLEEP_KEY = "wait_pair_sleep"  # шаг 1: ждём «Когда заснул?»
+WAIT_PAIR_WAKE_KEY = "wait_pair_wake"  # шаг 2: ждём «Когда проснулся?»
+CONFIRM_PAIR_KEY = "confirm_pair"  # §7.13 пары: оба момента до решения
+
+# Формулировка шага 2 пары (design D23 — решение продакта 01.11; секции
+# «Когда проснулся?» в ТЗ §7 нет — служебный вопрос, список форматов —
+# §7.11 дословно). Шаг 1 («Когда заснул?») отвечает §7.11 ДОСЛОВНО —
+# texts.BACKFILL_ASK_TIME: формулировка шага 1 закреплена TC-BFD-001
+# (диалог заднего числа 4.1), новой секции ТЗ для неё нет.
+PAIR_ASK_WAKE = f"Когда проснулся?\n\n{texts.BACKFILL_ASK_TIME}"
 
 # Сообщение наблюдателю — единый текст texts.OBSERVER_DENIED через
 # services.access.deny_message() (задача 5.1, design D13; review-001-2.4,
@@ -352,6 +372,21 @@ def _pending_kind(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     return kind if kind in (KIND_SLEEP, KIND_WAKE) else None
 
 
+def _clear_pair_phases(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Снять ВСЕ фазы парного ввода (задача 3.1, design D23): шаг 1, шаг 2
+    и §7.13-подтверждение пары.
+
+    Зеркало _clear_setting_phase (взаимное исключение фаз): начало нового
+    диалога event:*/time:manual — старые фазы пары не переживают (notes
+    review-001-4.3: «фазы не переживают завершение диалога»).
+    """
+    data = getattr(context, "user_data", None)
+    if isinstance(data, dict):
+        data.pop(WAIT_PAIR_SLEEP_KEY, None)
+        data.pop(WAIT_PAIR_WAKE_KEY, None)
+        data.pop(CONFIRM_PAIR_KEY, None)
+
+
 def _set_pending_kind(context: ContextTypes.DEFAULT_TYPE, kind: str | None) -> None:
     data = getattr(context, "user_data", None)
     if isinstance(data, dict):
@@ -372,6 +407,10 @@ def _set_pending_kind(context: ContextTypes.DEFAULT_TYPE, kind: str | None) -> N
             # settings_screen, 3de6685) — иначе текст события (например
             # «13:20») дошёл бы и в группу 2 и обновил настройку.
             _clear_setting_phase(context)
+        # Задача 3.1 (FR-51/D23): новый диалог event:* снимает и фазы
+        # парного ввода — любая постановка PENDING_KIND начинает диалог
+        # заново (та же симметрия, что у WAIT_EVENT_TIME выше).
+        _clear_pair_phases(context)
 
 
 def _set_wait_event_time(
@@ -392,6 +431,9 @@ def _set_wait_event_time(
         # к _clear_backfill_phases в settings_screen (3de6685), см.
         # _clear_setting_phase.
         _clear_setting_phase(context)
+        # Задача 3.1 (FR-51/D23): вход в одиночную ветку (wake) гасит и
+        # фазы парного ввода — два диалога группы 0 одновременно запрещены.
+        _clear_pair_phases(context)
 
 
 def _clear_setting_phase(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -551,6 +593,26 @@ async def time_choose_callback(
             return
 
         if action == CALLBACK_TIME_MANUAL:
+            if kind == KIND_SLEEP:
+                # Задача 3.1 (FR-51, design D23, ОВ-5.1): парный ввод сна —
+                # шаг 1 «Когда заснул?» (§7.11-стиль: текст §7.11 дословно).
+                # WAIT_EVENT_TIME ставится КАК РАНЬШЕ (контракт ветки 4.1,
+                # TC-BFD-001), плюс фаза-маркер шага 1 пары — по ней
+                # backfill.py ведёт ПАРНЫЙ разбор вместо одиночного.
+                # Легаси-пробы фаз (только WAIT_EVENT_TIME + PENDING_KIND)
+                # идут одиночной веткой — behavior сохранён. Взаимное
+                # исключение фаз — внутри _set_wait_event_time (настройки
+                # и зависшие фазы пары сняты).
+                _set_wait_event_time(context, True)
+                data = getattr(context, "user_data", None)
+                if isinstance(data, dict):
+                    data[WAIT_PAIR_SLEEP_KEY] = True
+                await query.answer()
+                if update.effective_message is not None:
+                    await update.effective_message.reply_text(
+                        texts.BACKFILL_ASK_TIME
+                    )
+                return
             # FR-15: запрос времени текстом §7.11; фаза WAIT_EVENT_TIME
             # сохраняется в context.user_data (задача 4.1, design D10) —
             # текстовый ввод примет обработчик backfill.py. Разбор ввода

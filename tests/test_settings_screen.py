@@ -26,7 +26,13 @@ from src import texts
 from src.db import init_db
 from src.handlers import backfill, events, settings_screen
 from src.handlers.backfill import CONFIRM_OVERWRITE_KEY, backfill_time_message
-from src.handlers.events import PENDING_KIND_KEY, WAIT_EVENT_TIME_KEY
+from src.handlers.events import (
+    PAIR_ASK_WAKE,
+    PENDING_KIND_KEY,
+    WAIT_EVENT_TIME_KEY,
+    WAIT_PAIR_SLEEP_KEY,
+    WAIT_PAIR_WAKE_KEY,
+)
 from src.handlers.settings_screen import (
     CALLBACK_SETTINGS_CANCEL,
     CALLBACK_SETTINGS_SHOW,
@@ -781,21 +787,36 @@ def test_tc_sett_030_event_entry_clears_setting_phase(db_path, monkeypatch):
     # Интерливинг: пользователь успел открыть правку настройки между
     # нажатиями — фаза настроек снова активна. «⏪ Ввести время вручную»:
     # постановка WAIT_EVENT_TIME снимает её повторно (второе место).
+    # Задача 3.1 (FR-51/D23): вид «сон» + ручной ввод — это ПАРНЫЙ диалог,
+    # поэтому рядом с WAIT_EVENT_TIME ставится маркер шага 1 пары.
     context.user_data[WAIT_SETTING_VALUE] = "wake_deadline"
     _, context = _press_event(db_path, "time:manual", context=context)
     assert context.user_data.get(WAIT_EVENT_TIME_KEY) is True
+    assert context.user_data.get(WAIT_PAIR_SLEEP_KEY) is True
     assert WAIT_SETTING_VALUE not in context.user_data
 
-    # Ввод «13:20» принимаете ОБЕ группы; группа 0 разбирает его в событие,
-    # группе 2 фаза не оставлена — настройки молчат.
+    # Шаг 1 пары: «13:20» — время засыпания; события ещё НЕТ, бот
+    # спрашивает «Когда проснулся?» (PAIR_ASK_WAKE). Группа 2 молчит —
+    # фаза настроек снята.
     group0 = _type_time_backfill(db_path, context, "13:20")
     assert len(group0.effective_message.replies) == 1
-    assert "Событие записано" in group0.effective_message.replies[0]
+    assert group0.effective_message.replies[0] == PAIR_ASK_WAKE
+    assert context.user_data.get(WAIT_PAIR_WAKE_KEY) == {
+        "sleep_utc": "2026-11-01 10:20:00"  # 13:20 МСК = 10:20 UTC
+    }
     group2 = _type_value(db_path, context, "13:20")
     assert group2.effective_message.replies == []  # фазы настроек нет — молча
 
-    # Событие создано группой 0; настройка и история НЕ тронуты.
-    assert _event_count(conn) == 1
+    # Шаг 2 пары: «14:20» — ЕДИНАЯ проверка пары → созданы ОБА события
+    # задним числом; группа 2 по-прежнему молчит.
+    group0 = _type_time_backfill(db_path, context, "14:20")
+    assert len(group0.effective_message.replies) == 1
+    assert "Событие записано" in group0.effective_message.replies[0]
+    group2 = _type_value(db_path, context, "14:20")
+    assert group2.effective_message.replies == []
+
+    # Пара создана группой 0 (два события); настройка и история НЕ тронуты.
+    assert _event_count(conn) == 2
     assert SettingsService(conn).get(user["id"], "wake_deadline") == "15:30"
     assert _history_rows(conn, user["id"]) == []
     conn.close()

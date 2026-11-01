@@ -42,6 +42,24 @@
 #
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
+# Задача 3.1 (add-settings-history, FR-51, design D23; ОВ-5.1 — решение
+# продакта 01.11): ПАРНЫЙ ввод сна задним числом — ДВА ШАГА. Вид «сон» +
+# «⏪ Ввести время вручную» (events.py) ставит WAIT_EVENT_TIME как раньше
+# (контракт ветки 4.1) ПЛЮС маркер шага 1 WAIT_PAIR_SLEEP_KEY, вопрос —
+# §7.11 дословно («Введите время в формате…» — вопрос «Когда заснул?»);
+# ответ ставит фазу шага 2 (WAIT_PAIR_WAKE_KEY) и спрашивает «Когда
+# проснулся?» (PAIR_ASK_WAKE). После шага 2 — ЕДИНАЯ проверка ПАРЫ
+# (event.detect_pair_conflict, один вызов): порядок wake > sleep и
+# пересечение интервала пары с существующими событиями; конфликт → §7.13
+# [Изменить]/[Отмена] (CONFIRM_PAIR_KEY; «Изменить» переспрашивает пару
+# с шага 1, «Отменить» гасит всё). Без конфликта создаются ОБА события
+# (create_event, is_backfilled=1; каждая запись — точка ре-шедула
+# напоминаний FR-41) и ответ §7.14-стиль (сводка PB-3 + окно, сборщики
+# существующие). Глубина §7.15 — для ОБОИХ времён пары. Разбор по фазам
+# БЕЗ маркера пары (легаси-пробы WAIT_EVENT_TIME + PENDING_KIND) идёт
+# одиночной веткой — behavior существующего backfill сохранён (FR-51:
+# незакрытый sleep → одиночная ветка wake спрашивает только пробуждение).
+#
 # Слой handlers (design D1): единственное обращение к сервисам — get_user
 # (пояс пользователя для парсера, design D4), SettingsService (глубина
 # ввода, design D14), detect_conflict / overwrite_event (конфликты §7.13,
@@ -59,9 +77,14 @@ from telegram.ext import ContextTypes
 from src import texts
 from src.handlers import common
 from src.handlers.events import (
+    CONFIRM_PAIR_KEY,
     OBSERVER_DENIED,
+    PAIR_ASK_WAKE,
     PENDING_KIND_KEY,
     WAIT_EVENT_TIME_KEY,
+    WAIT_PAIR_SLEEP_KEY,
+    WAIT_PAIR_WAKE_KEY,
+    _clear_pair_phases,
     day_summary_lines,
     next_sleep_line,
 )
@@ -70,6 +93,7 @@ from src.services.event import (
     ROLE_OBSERVER,
     create_event,
     detect_conflict,
+    detect_pair_conflict,
     get_user,
     overwrite_event,
 )
@@ -85,11 +109,36 @@ CALLBACK_CONFLICT_CANCEL = "conflict:cancel"
 # в PENDING_KIND_KEY (см. events.py).
 CONFIRM_OVERWRITE_KEY = "confirm_overwrite"
 
+# Формат строки UTC БД (design D4) — единая константа модуля.
+_TS_DB_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 def is_waiting_for_time(context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Активна ли фаза ожидания текстового ввода времени (design D10)."""
     data = getattr(context, "user_data", None)
     return isinstance(data, dict) and bool(data.get(WAIT_EVENT_TIME_KEY))
+
+
+def _pair_sleep_active(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Активна ли фаза шага 1 пары «Когда заснул?» (задача 3.1, D23)."""
+    data = getattr(context, "user_data", None)
+    return isinstance(data, dict) and bool(data.get(WAIT_PAIR_SLEEP_KEY))
+
+
+def _pair_wake_phase(context: ContextTypes.DEFAULT_TYPE) -> dict | None:
+    """Фаза шага 2 пары: {sleep_utc}; None — фазы нет/фаза неполна.
+
+    Неполная фаза (перезапуск процесса) гасится — безопасный дефолт без
+    записи (design D10-стиль).
+    """
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return None
+    phase = data.get(WAIT_PAIR_WAKE_KEY)
+    if isinstance(phase, dict) and "sleep_utc" in phase:
+        return phase
+    data.pop(WAIT_PAIR_WAKE_KEY, None)
+    return None
 
 
 def _clear_wait_phase(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,12 +159,15 @@ def _pending_kind(context: ContextTypes.DEFAULT_TYPE) -> str | None:
 
 def _clear_conflict_phases(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Снять ВСЕ фазы диалога: разбор завершён (конфликт разрешён — 4.4,
-    либо событие записано — 4.5)."""
+    либо событие записано — 4.5, либо пара завершена — 3.1)."""
     data = getattr(context, "user_data", None)
     if isinstance(data, dict):
         data.pop(CONFIRM_OVERWRITE_KEY, None)
         data.pop(PENDING_KIND_KEY, None)
         data.pop(WAIT_EVENT_TIME_KEY, None)
+        # Задача 3.1 (FR-51/D23): фазы парного ввода гасятся тем же
+        # терминальным сбросом (единый хелпер — без дублей очистки).
+        _clear_pair_phases(context)
 
 
 def _conflict_markup() -> InlineKeyboardMarkup:
@@ -176,20 +228,175 @@ def _backfill_success_text(
     )
 
 
+async def _parse_pair_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[datetime, dict] | None:
+    """Разбор текста ОДНОГО шага пары (задача 3.1, FR-51; D23).
+
+    Общая для обоих шагов ветка исходов парсера: мусор → §7.12 (фаза
+    шага сохранена), будущее → предупреждение (фаза сохранена), старше
+    backfill_depth_days → §7.15 (глубина §7.15 — для ОБОИХ времён пары;
+    терминальная ветка: ВСЕ фазы диалога сняты). Возвращает
+    (момент UTC, пользователь) — либо None, если ответ уже отправлен.
+    """
+    if update.message is None or update.effective_user is None:
+        return None
+    conn = common.open_conn(context)
+    try:
+        user = get_user(conn, update.effective_user.id)
+        # Глубина ввода — из settings при каждом использовании (FR-24,
+        # design D14), без кэша.
+        depth = int(
+            SettingsService(conn).get(user["id"], "backfill_depth_days")
+        )
+    finally:
+        conn.close()
+
+    parsed = parse_time_input(
+        update.message.text or "",
+        user["timezone"],
+        datetime.now(timezone.utc),
+        max_age_days=depth,
+    )
+    if parsed is None:
+        # FR-16: мусор → §7.12; фаза шага сохранена (повторный ввод).
+        await update.message.reply_text(texts.BACKFILL_BAD_FORMAT)
+        return None
+    if parsed is FUTURE:
+        # FR-20 (решение №4): предупреждение без записи, фаза сохранена.
+        await update.message.reply_text(texts.FUTURE_TIME_WARNING)
+        return None
+    if parsed is TOO_OLD:
+        # FR-17 (design D14): §7.15 дословно, без записи; глубина
+        # применяется к обоим временям пары. Терминальная ветка — сняты
+        # ВСЕ фазы, включая PENDING_KIND_KEY (notes review-001-4.3).
+        _clear_conflict_phases(context)
+        await update.message.reply_text(texts.BACKFILL_TOO_OLD)
+        return None
+    if not isinstance(parsed, datetime):
+        # Страховка от новых исходов парсера (minors review-001-4.2).
+        _clear_conflict_phases(context)
+        return None
+    return parsed, user
+
+
+async def _pair_sleep_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Шаг 1 пары (задача 3.1, FR-51, design D23): «Когда заснул?».
+
+    ЕДИНЫЙ конфликт-чек пары здесь НЕ вызывается (D23: проверка одна,
+    после ОБОИХ времён) — распознанный момент запоминается в фазе
+    WAIT_PAIR_WAKE_KEY, бот спрашивает «Когда проснулся?» (PAIR_ASK_WAKE).
+    """
+    step = await _parse_pair_step(update, context)
+    if step is None:
+        return
+    parsed, _user = step
+    data = getattr(context, "user_data", None)
+    if isinstance(data, dict):
+        data.pop(WAIT_PAIR_SLEEP_KEY, None)
+        data[WAIT_PAIR_WAKE_KEY] = {
+            "sleep_utc": parsed.strftime(_TS_DB_FORMAT),
+        }
+    if update.message is not None:
+        await update.message.reply_text(PAIR_ASK_WAKE)
+
+
+async def _pair_wake_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Шаг 2 пары (задача 3.1, FR-51, design D23): «Когда проснулся?».
+
+    После разбора — ЕДИНАЯ проверка ПАРЫ (detect_pair_conflict, один
+    вызов): порядок wake > sleep и пересечение интервала пары с
+    существующими событиями. Конфликт → §7.13 [Изменить]/[Отмена] (оба
+    момента — в фазе CONFIRM_PAIR_KEY). Без конфликта создаются ОБА
+    события (create_event ×2, is_backfilled=1; каждая запись — точка
+    ре-шедула напоминаний FR-41) и ответ §7.14-стиль: факт + строка
+    следующего сна + сводка PB-3 (существующие сборщики переиспользованы).
+    """
+    if update.message is None or update.effective_user is None:
+        return
+    phase = _pair_wake_phase(context)
+    if phase is None:
+        return
+    step = await _parse_pair_step(update, context)
+    if step is None:
+        return
+    parsed, user = step
+    when_utc = parsed.strftime(_TS_DB_FORMAT)
+    sleep_utc = phase["sleep_utc"]
+
+    conn = common.open_conn(context)
+    try:
+        # Единый конфликт-чек ПАРЫ — ровно один вызов на пару (D23).
+        conflict = detect_pair_conflict(conn, user["id"], sleep_utc, when_utc)
+        if conflict is not None:
+            # §7.13 с кнопками [Изменить]/[Отмена]; фазы шагов сняты,
+            # оба момента пары — в CONFIRM_PAIR_KEY до решения.
+            data = getattr(context, "user_data", None)
+            if isinstance(data, dict):
+                data.pop(WAIT_PAIR_SLEEP_KEY, None)
+                data.pop(WAIT_PAIR_WAKE_KEY, None)
+                data[CONFIRM_PAIR_KEY] = {
+                    "sleep_utc": sleep_utc,
+                    "wake_utc": when_utc,
+                }
+            await update.message.reply_text(
+                texts.backfill_conflict_text(
+                    texts.KIND_LABELS[conflict["event_type"]],
+                    _local_hhmm(conflict["timestamp"], user["timezone"]),
+                ),
+                reply_markup=_conflict_markup(),
+            )
+            return
+
+        try:
+            # Сначала засыпание, затем пробуждение: create_event
+            # перечитывает состояние из БД (design D5) — пара записывается
+            # согласованно; каждая запись — точка ре-шедула (FR-41).
+            create_event(conn, user["id"], KIND_SLEEP, sleep_utc, is_backfilled=True)
+            create_event(conn, user["id"], KIND_WAKE, when_utc, is_backfilled=True)
+            # §7.14-стиль по моменту пробуждения пары (страница дня —
+            # страница ввода; сборщики существующие, задача 3.1).
+            answer = _backfill_success_text(conn, user, when_utc)
+        except ValueError:
+            # Состояние изменилось между проверкой и записью (design D5):
+            # пара НЕ создана, фазы сняты — без ответа «успех».
+            _clear_conflict_phases(context)
+            return
+    finally:
+        conn.close()
+    # Успех — диалог завершён целиком: сняты ВСЕ фазы.
+    _clear_conflict_phases(context)
+    await update.message.reply_text(answer)
+
+
 async def backfill_time_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Текстовый ввод в фазе WAIT_EVENT_TIME (задачи 4.1–4.2, design D10).
+    """Текстовый ввод в фазах диалога заднего числа (задачи 4.1–4.2 и
+    3.1 парного ввода, design D10/D23).
 
-    Вне диалога (фаза не активна) текст игнорируется молча — bot не
-    реагирует на произвольные сообщения пользователей. В фазе ввод
-    разбирается парсером (задачи 4.2–4.3): прошедшее время в пределах
-    глубины ввода → запись события (is_backfilled=1) и ответ §7.14 со
-    сводкой за день (задача 4.5) либо §7.13 при конфликте (4.4), мусор →
-    §7.12, будущее → предупреждение, старше backfill_depth_days → §7.15
-    (FR-17, фаза снята — диалог завершён).
+    Вне диалога (ни одной фазы) текст игнорируется молча — bot не
+    реагирует на произвольные сообщения пользователей. Фазы пары
+    (задача 3.1, FR-51) обслуживаются ПЕРВЫМИ — они не пересекаются с
+    WAIT_EVENT_TIME (одиночная ветка — wake и легаси-разбор — не менялась).
+    Одиночная ветка: прошедшее время в пределах глубины ввода → запись
+    события (is_backfilled=1) и ответ §7.14 со сводкой за день (задача
+    4.5) либо §7.13 при конфликте (4.4), мусор → §7.12, будущее →
+    предупреждение, старше backfill_depth_days → §7.15 (FR-17, фаза
+    снята — диалог завершён).
     """
     if update.message is None or update.effective_user is None:
+        return
+    # Задача 3.1 (FR-51/D23): парный диалог — два шага.
+    if _pair_sleep_active(context):
+        await _pair_sleep_message(update, context)
+        return
+    if _pair_wake_phase(context) is not None:
+        await _pair_wake_message(update, context)
         return
     if not is_waiting_for_time(context):
         # Текст вне диалога — не мешает (критерий задачи 4.1).
@@ -326,6 +533,36 @@ async def conflict_callback(
         if user["role"] == ROLE_OBSERVER:
             _clear_conflict_phases(context)
             await query.answer(text=OBSERVER_DENIED, show_alert=False)
+            return
+
+        # Задача 3.1 (FR-51, design D23): конфликт ПАРЫ. «Отменить» —
+        # ничего не создано, ВСЕ фазы сняты. «Изменить» — пара начинается
+        # заново с шага 1 «Когда заснул?» (оба времени переспрашиваются:
+        # перезапись одной существующей записи пару не восстанавливает).
+        pending_pair = (
+            data.get(CONFIRM_PAIR_KEY) if isinstance(data, dict) else None
+        )
+        if (
+            isinstance(pending_pair, dict)
+            and "sleep_utc" in pending_pair
+            and "wake_utc" in pending_pair
+        ):
+            _clear_conflict_phases(context)
+            await query.answer()
+            if update.effective_message is None:
+                return
+            if query.data == CALLBACK_CONFLICT_CANCEL:
+                await update.effective_message.reply_text(
+                    texts.BACKFILL_CONFLICT_CANCELLED
+                )
+                return
+            # «Изменить»: пара заново с шага 1 — WAIT_EVENT_TIME + маркер
+            # шага 1, вопрос §7.11 дословно (как на входе в диалог).
+            user_data = getattr(context, "user_data", None)
+            if isinstance(user_data, dict):
+                user_data[WAIT_EVENT_TIME_KEY] = True
+                user_data[WAIT_PAIR_SLEEP_KEY] = True
+            await update.effective_message.reply_text(texts.BACKFILL_ASK_TIME)
             return
 
         # Фазы нет / неполны — перезаписывать нечем (безопасный дефолт).

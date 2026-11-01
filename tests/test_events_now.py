@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src import texts
 from src.db import init_db
 from src.handlers import events
 from src.handlers.events import (
@@ -383,6 +384,79 @@ def test_time_now_wake_late_rise_answers_7_4_with_anchors(db_path, conn):
         ),
         "Подъем: 09:00",
         "Бодрствование общее: 0 мин",
+    ]
+
+
+# ------------------------------- BUG-005: после дневного сна (Флоу 3)
+# Решение продакта 01.11: пробуждение ПОСЛЕ дневного сна (последний
+# завершённый интервал страницы — дневной отрезок) получает КОНКРЕТНОЕ
+# время ухода «Рекомендованное время ухода: ЧЧ:ММ» (NightWindow.
+# recommended, ОВ-4.2), а не прошедшее дневное окно; позже 22:30 —
+# предупреждение. Утренний подъём (последний завершённый интервал —
+# ночной отрезок) — дневное окно, как раньше (TC-EVNOW-010…012);
+# сценарии без «Подъема» — без строки (TC-EVNOW-003).
+
+def test_time_now_wake_after_day_sleep_recommends_bedtime(db_path, conn):
+    """TC-EVNOW-013 (BUG-005, сценарий приемки Марии): подъём 08:03,
+    дневной сон 13:40, «☀️ Проснулся» → «🕐 Сейчас» в 15:15 — ответ
+    содержит «Рекомендованное время ухода: 22:00.» (NightWindow.
+    recommended: бодрствование 5 ч 37 мин, 12 ч 10 мин набираются в
+    21:48 — раньше 22:00 → ровно 22:00) и БЕЗ прошедшего окна «Окно
+    дневного сна: 13:23–14:03». Время зафиксировано: 12:15 UTC =
+    15:15 МСК 10.10."""
+    user_id = _uid(conn)
+    # Ночь 09.10 22:00 МСК → 08:03 МСК (завершённый ночной отрезок);
+    # дневной сон 13:40 МСК — закрывает САМА кнопка «Сейчас» 15:15.
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-10-09 19:00:00")
+    SleepEventsRepo(conn).insert(user_id, "wake", "2026-10-10 05:03:00")
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-10-10 10:40:00")
+
+    update, _ = _wake_now(
+        db_path, datetime(2026, 10, 10, 12, 15, tzinfo=timezone.utc)
+    )
+
+    answer = update.effective_message.replies[0]
+    assert answer.splitlines() == [
+        "✅ Пробуждение записано в 15:15.",
+        "Рекомендованное время ухода: 22:00.",
+        "Подъем: 08:03",
+        "Заснул: 13:40",
+        "Проснулся: 15:15",
+        "Дневной сон: 1 ч 35 мин",
+        "Бодрствование общее: 5 ч 37 мин",
+    ]
+    assert "Окно дневного сна" not in answer
+    assert "13:23" not in answer
+    assert "Крайнее пробуждение" not in answer
+
+
+def test_time_now_wake_after_late_day_sleep_warns_past_deadline(db_path, conn):
+    """TC-EVNOW-014 (BUG-005): поздний дневной сон 15:00–18:00 при
+    подъёме 08:00 — recommended (23:10: бодрствование 7 ч, 12 ч 10 мин
+    набираются в 23:10) СТРОГО позже 22:30 → та же строка рекомендации
+    с предупреждением (§7.24-стиль, коротко и без жаргона). Время:
+    15:00 UTC = 18:00 МСК 10.10."""
+    user_id = _uid(conn)
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-10-09 19:00:00")
+    SleepEventsRepo(conn).insert(user_id, "wake", "2026-10-10 05:00:00")
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-10-10 12:00:00")
+
+    update, _ = _wake_now(
+        db_path, datetime(2026, 10, 10, 15, 0, tzinfo=timezone.utc)
+    )
+
+    answer = update.effective_message.replies[0]
+    lines = answer.splitlines()
+    assert lines[0] == "✅ Пробуждение записано в 18:00."
+    assert lines[1] == texts.recommended_bedtime_late_line("23:10")
+    assert "Окно дневного сна" not in answer
+    # Сводка PB-3 не меняется (подъём 08:00; (18:00 − 08:00) − 3:00 сна).
+    assert lines[2:] == [
+        "Подъем: 08:00",
+        "Заснул: 15:00",
+        "Проснулся: 18:00",
+        "Дневной сон: 3 ч",
+        "Бодрствование общее: 7 ч",
     ]
 
 

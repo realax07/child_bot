@@ -36,7 +36,9 @@
 # суммарный сон за день НЕ вычисляется (может превышать 24 ч из-за ночной
 # страницы — design D8). Задача 2.3 (FR-38, design D20): подавление окон
 # волны 6 снято — строка окна дневного сна добавляется К сводке
-# (events.nap_window_text — окно страницы ввода от фактического подъёма).
+# (events.next_sleep_line — строка следующего сна страницы ввода; ред.
+# BUG-005: утренний подъём — окно дневного сна, после дневного сна —
+# конкретное время ухода).
 #
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
@@ -61,7 +63,7 @@ from src.handlers.events import (
     PENDING_KIND_KEY,
     WAIT_EVENT_TIME_KEY,
     day_summary_lines,
-    nap_window_text,
+    next_sleep_line,
 )
 from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, resolve_tz
 from src.services.event import (
@@ -152,8 +154,8 @@ def _local_hhmm(utc_moment: str | datetime, tz_name: str | None) -> str:
 def _backfill_success_text(
     conn: sqlite3.Connection, user: dict, when_utc: str
 ) -> str:
-    """Ответ §7.14 (FR-19 в ред. волны 6, PB-3 + FR-38, задача 2.3/D20):
-    подтверждение + строка окна + сводка событий дня.
+    """Ответ §7.14 (FR-19 в ред. волны 6, PB-3 + FR-38, задача 2.3/D20;
+    ред. BUG-005): подтверждение + строка следующего сна + сводка дня.
 
     Сводка — фактические события дня СТРАНИЦЫ вводимого времени (design
     D6/D8), не сегодняшней, в формате продакта (Подъем / Заснул /
@@ -161,13 +163,14 @@ def _backfill_success_text(
     сборка — events.day_summary_lines (единая точка всех трёх
     подтверждений); суммарный сон за день НЕ вычисляется (может
     превышать 24 ч из-за ночной страницы — D8). Подавление окон волны 6
-    СНЯТО (задача 2.3): строка окна дневного сна добавляется К сводке
-    (events.nap_window_text — тот же calculation.nap_window от подъёма
-    страницы ввода; None — факта «Подъем» нет, строка не добавляется);
-    сама сводка PB-3 НЕ меняется.
+    СНЯТО (задача 2.3): строка следующего сна добавляется К сводке
+    (events.next_sleep_line — ред. BUG-005: утренний подъём — окно
+    дневного сна от подъёма страницы ввода; после дневного сна —
+    «Рекомендованное время ухода»; None — факта «Подъем» нет, строка
+    не добавляется); сама сводка PB-3 НЕ меняется.
     """
     lines = day_summary_lines(conn, user, when_utc)
-    window_line = nap_window_text(conn, user, when_utc)
+    window_line = next_sleep_line(conn, user, when_utc)
     return texts.backfill_success_text(
         _local_hhmm(when_utc, user["timezone"]), lines, window_line
     )

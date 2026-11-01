@@ -19,11 +19,15 @@
 # строка «Крайнее пробуждение: …» НЕ выводится вовсе (решение продакта
 # 29.10: норма постоянна; wake_deadline остаётся в настройках — Пакет 3 —
 # и в подсказках Пакета 2, из расчётов не удалён).
-# FR-8 (в ред. PB-3 + FR-38, задача 2.3): wake «сейчас» → §7.2:
-# подтверждающая строка + строка окна дневного сна от фактического
-# подъёма (calculation.nap_window, design D16/D20; §7.3/§7.4-стиль при
-# раннем/позднем подъёме — якоря из настроек) + сводка событий дня;
-# подавление окон волны 6 снято.
+# FR-8 (в ред. PB-3 + FR-38, задача 2.3; ред. BUG-005): wake «сейчас» →
+# §7.2: подтверждающая строка + строка СЛЕДУЮЩЕГО сна по типу
+# пробуждения (последний завершённый интервал страницы): после дневного
+# сна — «Рекомендованное время ухода: ЧЧ:ММ» (calculation.night_window,
+# ОВ-4.2; позже 22:30 — предупреждение); утренний подъём — окно
+# дневного сна от фактического подъёма (calculation.nap_window, design
+# D16/D20; §7.3/§7.4-стиль при раннем/позднем подъёме — якоря из
+# настроек) + сводка событий дня; подавление окон волны 6 снято,
+# сценарии без «Подъема» — без строки (как в волне 6).
 # design D4: время хранится в UTC; в текстах ответов — локальное время
 # пользователя (users.timezone через zoneinfo).
 #
@@ -47,9 +51,14 @@ from src.services import access
 from src.services.backfill_parser import resolve_tz
 from src.services.calculation import (
     DEFAULT_DAY_START,
+    _unclosed_interval,
+    build_sleep_intervals,
+    classify_sleep,
     day_facts_lines,
     day_page_of,
+    merge_intervals,
     nap_window,
+    night_window,
 )
 from src.services.event import create_event, get_user, list_raw_events
 from src.services.settings import SettingsService
@@ -177,25 +186,60 @@ def day_summary_lines(
     )
 
 
-def nap_window_text(
+def _woke_after_day_sleep(
+    raw_events: list[tuple[str, datetime]],
+    ref_local: datetime,
+    settings: dict,
+) -> bool:
+    """Тип пробуждения (BUG-005): последний ЗАВЕРШЁННЫЙ интервал —
+    дневной отрезок?
+
+    Интервалы — calculation.build_sleep_intervals + merge_intervals (та
+    же склейка, что в окнах); незакрытый сон — единый хелпер
+    `_unclosed_interval` (design D16, как в recommendation/scheduler:
+    правило не дублируется) — его конец НЕ пробуждение. Завершённых
+    интервалов нет — False (строку следующего сна в этом случае не
+    строит nap_window).
+    """
+    merged = merge_intervals(
+        build_sleep_intervals(
+            raw_events,
+            now_local=ref_local,
+            day_start=_settings_day_start(str(settings.get("day_start"))),
+        ),
+        int(settings.get("merge_threshold", 20)),
+    )
+    unclosed = _unclosed_interval(
+        sorted(raw_events, key=lambda item: item[1]), merged
+    )
+    completed = [interval for interval in merged if interval is not unclosed]
+    if not completed:
+        return False
+    last = completed[-1]
+    return not classify_sleep(last.start_local, last.end_local).is_night
+
+
+def next_sleep_line(
     conn: sqlite3.Connection, user: dict, ref_utc: str | datetime
 ) -> str | None:
-    """Строка окна дневного сна для подтверждений (FR-38, задача 2.3,
-    design D20) или None — факта «Подъем» страницы нет.
+    """Строка СЛЕДУЮЩЕГО сна для подтверждения пробуждения (FR-8/FR-38;
+    ред. BUG-005, решение продакта 01.11) или None — факта «Подъем»
+    страницы нет (неполные данные — без строки, как в волне 6).
 
-    Окно — calculation.nap_window (ЕДИНСТВЕННАЯ точка расчёта, design
-    D16: окно от фактического подъёма страницы, не хардкод); расчётный
-    момент — локальное время ref_utc (для «Сейчас» — момент записи, для
-    заднего числа — момент вводимого события: окно страницы ввода).
-    Вариант текста — по флагам отклонений §3.6 из NapWindow:
-      - stretch_to_limit → §7.3 (ранний подъём): совет «до лимита» +
-        окно + якоря wake_deadline (из расчёта) и night_target
-        (настройка);
-      - after_deadline → §7.4 (поздний подъём): окно + якоря
-        wake_deadline и night_deadline (настройка);
-      - иначе §7.2 — просто строка окна.
-    События и настройки читаются при каждом вызове (FR-24, design D14);
-    сборка текста — templates texts.nap_window_*.
+    Тип пробуждения — по последнему ЗАВЕРШЁННОМУ интервалу
+    (`_woke_after_day_sleep`):
+      - ДНЕВНОЙ отрезок → пробуждение ПОСЛЕ дневного сна: строка
+        «Рекомендованное время ухода: ЧЧ:ММ» — calculation.night_window
+        (ОВ-4.2: max(22:00, момент набора 12 ч 10 мин)); рекомендация
+        позже 22:30 (later_than_deadline) — с предупреждением (§7.24-
+        стиль). Прошедшее дневное окно НЕ показывается;
+      - НОЧНОЙ отрезок → утренний подъём: окно дневного сна, как раньше
+        (calculation.nap_window, design D16/D20; §7.2/§7.3/§7.4-стиль
+        по флагам отклонений §3.6).
+    Расчётный момент — локальное время ref_utc (для «Сейчас» — момент
+    записи, для заднего числа — момент вводимого события). События и
+    настройки читаются при каждом вызове (FR-24, design D14); сборка
+    текста — templates texts.*.
     """
     user_id = user["id"]
     tz_name = user["timezone"]
@@ -215,6 +259,14 @@ def nap_window_text(
     if nap is None:
         return None
 
+    if _woke_after_day_sleep(raw_events, ref_local, settings):
+        night = night_window(raw_events, ref_local, settings)
+        recommended_line = f"{night.recommended:%H:%M}"
+        if night.later_than_deadline:
+            return texts.recommended_bedtime_late_line(recommended_line)
+        return texts.recommended_bedtime_line(recommended_line)
+
+    # Утренний подъём — окно дневного сна (§7.2–7.4), как до BUG-005.
     start_line = f"{nap.start:%H:%M}"
     end_line = f"{nap.end:%H:%M}"
     deadline_line = f"{nap.wake_deadline:%H:%M}"
@@ -495,10 +547,11 @@ async def time_choose_callback(
         # Сводка — ЕДИНАЯ точка сборки (PB-3): события и настройки читаются
         # ПОСЛЕ записи события — факт уже в списке (расчётный момент — now).
         summary_lines = day_summary_lines(conn, user, now_utc)
-        # Строка окна — от фактического подъёма страницы (FR-38, D20):
-        # тот же расчётный момент, что у сводки; None — факта «Подъем»
-        # нет (окно от ненастоящего подъёма не строим).
-        window_line = nap_window_text(conn, user, now_utc)
+        # Строка следующего сна — по типу пробуждения (BUG-005, FR-38/D20):
+        # утренний подъём → дневное окно; после дневного сна → конкретное
+        # время ухода; None — факта «Подъем» нет (окна/рекомендации от
+        # неполных данных не строим).
+        window_line = next_sleep_line(conn, user, now_utc)
         if kind == KIND_SLEEP:
             # §7.5: БЕЗ строки окна (design D20: показ окон в §7.5
             # отклонён) и БЕЗ «Крайнего пробуждения» (решение 29.10).

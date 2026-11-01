@@ -359,3 +359,48 @@ def test_tc_bfs_004_backfill_appends_window_line_to_summary(db_path, conn, froze
         "Заснул: 09:40",
         "Бодрствование общее: 1 ч 40 мин",
     ]
+
+
+def test_tc_bfs_005_backfill_wake_after_day_sleep_recommends_bedtime(db_path, conn, frozen_now):
+    """TC-BFS-005 (BUG-005, §7.14; сценарий приемки Марии задним числом):
+    подъём вчера 08:03, дневной сон 13:40, ввод «вчера 15:15» (wake) —
+    последний завершённый интервал страницы ввода — дневной отрезок →
+    к сводке добавлена «Рекомендованное время ухода: 22:00.» (12 ч
+    10 мин набираются в 21:48 — раньше 22:00 → ровно 22:00) и БЕЗ
+    прошедшего окна дневного сна; сами строки сводки PB-3 не меняются.
+    Время зафиксировано: 8:00 МСК 10.10 (страница ввода «вчера»
+    закрыта — расчёт детерминирован)."""
+    user = get_user(conn, 5005)
+    # Ночь 08.10 22:00 МСК → подъём 09.10 08:03 МСК; дневной сон 13:40 МСК
+    # — закрывается вводимым wake 15:15 МСК.
+    _insert_event(conn, user["id"], "sleep", datetime(2026, 10, 8, 22, 0, tzinfo=TZ))
+    _insert_event(conn, user["id"], "wake", datetime(2026, 10, 9, 8, 3, tzinfo=TZ))
+    _insert_event(conn, user["id"], "sleep", datetime(2026, 10, 9, 13, 40, tzinfo=TZ))
+
+    user_data = {
+        WAIT_EVENT_TIME_KEY: True,
+        PENDING_KIND_KEY: "wake",
+    }
+    update, context = _send_text(db_path, "вчера 15:15", user_data, telegram_id=5005)
+
+    assert len(update.effective_message.replies) == 1
+    answer = update.effective_message.replies[0]
+    # Строки сводки PB-3 страницы «вчера» — без изменений; строка
+    # следующего сна — ПОСЛЕ них (ред. BUG-005).
+    assert answer.splitlines() == [
+        "✅ Событие записано на 15:15.",
+        "",
+        "Обновлённая сводка за день:",
+        "Подъем: 08:03",
+        "Заснул: 13:40",
+        "Проснулся: 15:15",
+        "Дневной сон: 1 ч 35 мин",
+        # Ред. BUG-004: конец — момент расчёта «сейчас» (08:00 10.10):
+        # (08:00 − 08:03 вчера) − 1:35 дневного сна = 22 ч 22 мин.
+        "Бодрствование общее: 22 ч 22 мин",
+        texts.recommended_bedtime_line("22:00"),
+    ]
+    assert "Окно дневного сна" not in answer
+    # Фазы сняты.
+    assert WAIT_EVENT_TIME_KEY not in context.user_data
+    assert PENDING_KIND_KEY not in context.user_data

@@ -3,8 +3,10 @@
 #
 # design D3: SQLite, journal_mode=WAL, foreign_keys=ON; таблицы users,
 # sleep_events, settings строго по ТЗ §9.1–9.3, плюс users.role
-# TEXT NOT NULL DEFAULT 'parent' (решение 26.10 №5). settings_history и
-# daily_summary НЕ создаются (пакеты 2–3).
+# TEXT NOT NULL DEFAULT 'parent' (решение 26.10 №5).
+# Change-пакет add-settings-history, задача 1.1: settings_history создаётся
+# по ТЗ §9.4 (design D21) — идемпотентно, данных не лифтуем (таблица
+# пустая в main), отдельной миграции нет; daily_summary НЕ создаётся.
 # design D4: время храним в UTC (DATETIME); TZ пользователя применяется
 # через zoneinfo на границе ввода/вывода/разметки, а не в схеме.
 # design D6: sleep_type и is_merged — nullable-резервы схемы (ТЗ §9.2);
@@ -73,6 +75,18 @@ _SCHEMA_STATEMENTS = (
         key    TEXT NOT NULL,
         value  TEXT,
         UNIQUE (user_id, key)
+    )
+    """,
+    # ТЗ §9.4 (FR-46, design D21, задача 1.1 add-settings-history):
+    # идемпотентное создание, данных не лифтуем (исслед. research §9.4)
+    """
+    CREATE TABLE IF NOT EXISTS settings_history (
+        id         INTEGER PRIMARY KEY,
+        user_id    INTEGER NOT NULL REFERENCES users(id),
+        key        TEXT NOT NULL,
+        old_value  TEXT,
+        new_value  TEXT,
+        changed_at DATETIME NOT NULL
     )
     """,
     # Индекс для выборок событий пользователя по времени (задача 1.2)

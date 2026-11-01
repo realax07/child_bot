@@ -45,7 +45,7 @@
 
 ## Волна 3. Автонапоминания (APScheduler)
 
-- [ ] 3.1 Планировщик напоминаний
+- [x] 3.1 Планировщик напоминаний
   - Зона: `src/services/scheduler.py` (новый), `src/handlers/reminders.py` (новый) или интеграция в `src/main.py`, `tests/test_scheduler.py` (новый), `src/main.py` (старт/стоп)
   - Сделать: единственный APScheduler в процессе бота: задачи push за `remind_before` (settings, дефолт 15) до окна дневного сна (§7.23) и до расчётного ночного окна (§7.24); push — `bot.send_message` чату владельца (telegram_id из `users`); ре-шедул идемпотентен — пересчёт при каждом событии (точки вызова EventService: create/overwrite/delete) и при старте процесса, job replace, «в прошлое» не шлём; логика окон — только через CalculationService (ТЗ §4.6 «логика та же»).
   - Трассировка: FR-39, FR-40, FR-41; design D19.

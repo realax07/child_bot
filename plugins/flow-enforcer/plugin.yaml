@@ -1,0 +1,17 @@
+name: flow-enforcer
+version: "0.3.0"
+description: >-
+  J43/J43.1 pre_tool_call-энфорсер делегаций: перехватывает delegate_task,
+  парсит flow-aware маркеры (flow=<1-5> role/repo/scope) из goal/context,
+  валидирует делегацию через flowctl prepare --dry-run --json СВОЕГО флоу
+  (план релиза Ф1/Ф2/Ф4, BUG-репорт, зоны, policy), post-filter «no-change
+  scope» для Флоу 2/4/5 и опциональную проверку последовательности этапов
+  (FLOW_ENFORCER_SEQUENCE=1, память фазы flowctl phase). Bypass — только
+  дословный маркер 'flow: bypass --by customer' (логируется в incident-файл).
+  J42 (L4): в контексте активной делегации перехватывает Bash git push —
+  разрешен только push в ветку из ALLOW-объекта (session['branch']);
+  вне делегации и без ALLOW-ветки — прежнее поведение.
+  J60 (MODEL_ENFORCE, дефолт ON; FLOW_MODEL_ENFORCE=off — деградация):
+  боевой этап 5.3-роли (SA/архитектор/DEV/BA, регруп J59) в goal обязан нести
+  маркер исполнителя [pi:<роль>] / [hermes:<роль>]; hermes на 5.3-роли —
+  DENY с подсказкой pi роль-пака; без маркера — WARN в лог (миграция).

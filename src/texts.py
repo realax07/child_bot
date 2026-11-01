@@ -420,16 +420,36 @@ UNDO_LEFTOVER_EMPTY = "Сегодня записей пока нет."
 
 
 def reminder_minutes_line(minutes: int) -> str:
-    """§7.23: «Через 15 минут» — N из настройки remind_before (дефолт 15)."""
+    """§7.23: «Через 15 минут» — N из настройки remind_before (дефолт 15).
+
+    После «через» — винительный падеж: «минуту» при N % 10 == 1
+    (кроме 11–14: «11 минут»), «минуты» при 2–4 (m1 review-001-3.1).
+    """
     if minutes % 100 in (11, 12, 13, 14):
         word = "минут"
     elif minutes % 10 == 1:
-        word = "минута"
+        word = "минуту"
     elif minutes % 10 in (2, 3, 4):
         word = "минуты"
     else:
         word = "минут"
     return f"Через {minutes} {word}"
+
+
+def reminder_duration_line(total: timedelta) -> str:
+    """§7.23/§7.24 reminder-путь: «5 ч 05 мин» — минуты ДО ДВУХ ЦИФР.
+
+    Reminder-специфичное форматирование (M1 review-001-3.1): тексты
+    §7.23/§7.24 и сценарий FR-39 дословно требуют «05 мин». ГЛОБАЛЬНЫЙ
+    format_duration НЕ тронут — байт-стабильность сводки PB-3.
+    """
+    minutes = max(0, round(total.total_seconds() / 60))
+    hours, mins = divmod(minutes, 60)
+    if hours == 0:
+        return f"{mins} мин"
+    if mins == 0:
+        return f"{hours} ч"
+    return f"{hours} ч {mins:02d} мин"
 
 
 def reminder_nap_text(

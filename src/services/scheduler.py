@@ -227,7 +227,7 @@ def compute_push_plan(
                     texts.reminder_minutes_line(int(remind_before.total_seconds() // 60)),
                     f"{nap.start:%H:%M}",
                     f"{nap.end:%H:%M}",
-                    texts.format_duration(total),
+                    texts.reminder_duration_line(total),  # §7.23: «5 ч 05 мин»
                 ),
             ))
 
@@ -244,7 +244,7 @@ def compute_push_plan(
                 chat_id=chat_id,
                 run_at_utc=_to_utc(run_at, tz_name),
                 text=texts.reminder_night_text(
-                    texts.format_duration(night.wake_total),
+                    texts.reminder_duration_line(night.wake_total),  # §7.24
                     f"{night.target:%H:%M}",
                     f"{night.deadline:%H:%M}",
                 ),

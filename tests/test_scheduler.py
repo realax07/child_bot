@@ -15,6 +15,9 @@ TC-SCHED-006 (FR-40): push §7.24 — расчётное рекомендова�
 момент срабатывания шлёт актуальный текст, устаревшее окно — не шлёт.
 TC-SCHED-007 (FR-41): ре-шедул-хук без активного планировщика — no-op
 (сервисы событий не зависят от планировщика).
+TC-SCHED-008 (fix review-001-3.1, M1/m1): грамматика «Через 21 минуту»
+и паддинг минут в reminder-пути «5 ч 05 мин»; глобальный format_duration
+не тронут (байт-стабильность PB-3).
 
 Фальшивые часы: фиксированные now_utc (Европа/Москва = UTC+3), никакого
 реального ожидания и time.sleep — задачи ставятся в незапущенный
@@ -150,11 +153,12 @@ def test_tc_sched_001_nap_push_15min_before_window(env):
     assert nap_push.chat_id == CHAT_ID
     assert nap_push.text == texts.reminder_nap_text(
         texts.reminder_minutes_line(15), "13:20", "14:00",
-        texts.format_duration(timedelta(hours=4, minutes=30)),
+        texts.reminder_duration_line(timedelta(hours=4, minutes=30)),
     )
     assert nap_push.text.startswith(
         "⏰ Через 15 минут открывается окно дневного сна: 13:20–14:00."
     )
+    assert nap_push.text.endswith("Бодрствование сейчас: 4 ч 30 мин.")
 
 
 def test_tc_sched_002_event_shifts_window_job_replaced(env):
@@ -287,9 +291,11 @@ def test_tc_sched_006b_nap_push_sends_at_fire_moment(env):
     assert len(bot.sent) == 1
     chat_id, text = bot.sent[0]
     assert chat_id == CHAT_ID
-    assert text == texts.reminder_nap_text(
-        texts.reminder_minutes_line(15), "13:20", "14:00",
-        texts.format_duration(timedelta(hours=5, minutes=5)),
+    # ЛИТЕРАЛ ТЗ §7.23 (сценарий FR-39): минуты < 10 паддятся до двух
+    # цифр — «5 ч 05 мин», а не «5 ч 5 мин» (M1 review-001-3.1).
+    assert text == (
+        "⏰ Через 15 минут открывается окно дневного сна: "
+        "13:20–14:00. Бодрствование сейчас: 5 ч 05 мин."
     )
 
     # Единая арифметика: окно плана == nap_window расчётов (D16/D17).
@@ -304,6 +310,35 @@ def test_tc_sched_006b_nap_push_sends_at_fire_moment(env):
     nap_push = next(p for p in plan if p.kind == KIND_NAP)
     assert f"{nap.start:%H:%M}–{nap.end:%H:%M}" in nap_push.text
     assert nap is not None  # подъём есть — окно расчётов не может быть None
+
+
+def test_tc_sched_008_reminder_grammar_and_zpadding():
+    """TC-SCHED-008: грамматика «Через 21 минуту» (m1) и паддинг минут
+    «5 ч 05 мин» (M1) review-001-3.1 — точные литералы; ГЛОБАЛЬНЫЙ
+    format_duration НЕ паддит (сводка PB-3 байт-стабильна)."""
+    assert texts.reminder_minutes_line(1) == "Через 1 минуту"
+    assert texts.reminder_minutes_line(2) == "Через 2 минуты"
+    assert texts.reminder_minutes_line(5) == "Через 5 минут"
+    assert texts.reminder_minutes_line(11) == "Через 11 минут"
+    assert texts.reminder_minutes_line(14) == "Через 14 минут"
+    assert texts.reminder_minutes_line(15) == "Через 15 минут"
+    assert texts.reminder_minutes_line(21) == "Через 21 минуту"
+    assert texts.reminder_minutes_line(22) == "Через 22 минуты"
+    assert texts.reminder_minutes_line(31) == "Через 31 минуту"
+
+    assert texts.reminder_duration_line(timedelta(hours=5, minutes=5)) == "5 ч 05 мин"
+    assert texts.reminder_duration_line(timedelta(hours=12, minutes=5)) == "12 ч 05 мин"
+    assert texts.reminder_duration_line(timedelta(hours=4, minutes=30)) == "4 ч 30 мин"
+    assert texts.reminder_duration_line(timedelta(minutes=45)) == "45 мин"
+    assert texts.reminder_duration_line(timedelta(hours=12)) == "12 ч"
+    # Глобальный хелпер остался без паддинга — байт-стабильность PB-3.
+    assert texts.format_duration(timedelta(hours=5, minutes=5)) == "5 ч 5 мин"
+
+    # §7.24 дословно с паддингом: «12 ч 05 мин».
+    assert texts.reminder_night_text("12 ч 05 мин", "22:00", "22:30") == (
+        "⏰ Пора готовиться ко сну. Суммарное бодрствование: 12 ч 05 мин. "
+        "Целевое время ухода: 22:00, крайнее — 22:30."
+    )
 
 
 def test_tc_sched_007_notify_without_scheduler_is_noop(env):

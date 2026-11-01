@@ -1,6 +1,8 @@
 <!-- review-002-3.1 | diff: c3011e8..9a8295f -->
 # Code review — add-recommendations, задача 3.1 «Планировщик напоминаний» — дельта фикса
 
+Reviewer-Delegation: deleg_30488638
+
 - Диф: `c3011e8..9a8295f` (dev 9a8295f в worktree feature/add-recommendations-3.1, `/home/openclaw/child_bot-worktrees/deleg-67d6d35465c34f33`).
 - Файлы дельты: `src/services/scheduler.py` (2 строки вызова), `src/texts.py` (хелпер `reminder_duration_line` + грамматика `reminder_minutes_line`), `tests/test_scheduler.py` (TC-SCHED-008, литеральные ассерты в TC-001/006b).
 - Контекст: review-001-3.1 (return: M1 — паддинг минут, m1 — винительный падеж). Санкции ПМ: reminder-хелпер вместо правки глобального `format_duration` (байт-стабильность PB-3); m2 — техдолг; m3 — решён (оставлено).

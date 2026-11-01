@@ -24,7 +24,7 @@ def register_handlers(application) -> None:
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-    from src.handlers import backfill, common, events, hint, settings_screen, start, undo
+    from src.handlers import backfill, common, events, hint, history, settings_screen, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
     application.add_handler(
@@ -65,6 +65,15 @@ def register_handlers(application) -> None:
         CallbackQueryHandler(
             backfill.conflict_callback,
             pattern=r"^conflict:(overwrite|cancel)$",
+        )
+    )
+    # 📊 История за неделю (add-settings-history 2.1, ТЗ §10.2–10.3,
+    # design D22): команда /history и колбэк history:week — единый
+    # экран §7.20 + блок сегодня; событий не создаёт.
+    application.add_handler(CommandHandler("history", history.history_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            history.history_callback, pattern=history.CALLBACK_PATTERN
         )
     )
     # ⚙️ Настройки (add-settings-history 1.2, ТЗ §10.2–10.4, design D21):

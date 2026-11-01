@@ -138,11 +138,10 @@ async def reply_button_message(
     §10.3); «⚙️ Настройки» (BTN_SETTINGS, единый источник — state.py,
     add-settings-history 2.0) — текстовый маршрут к экрану настроек
     (1.2: callback settings:show и текст панели — тот же двойной вход);
-    «📊 История за неделю» (BTN_HISTORY, 2.0) распознана как кнопка
-    панели, но обработчик истории появится в задаче 2.1
-    (src/handlers/history.py, callback history:week, вне зоны 2.0) — до
-    тех пор нажатие без действия и БЕЗ записи (state-ui spec: нажатие не
-    меняет дневник). Состояние перечитывается из БД (guard D5,
+    «📊 История за неделю» (BTN_HISTORY, 2.0) — текстовый маршрут к
+    экрану истории за неделю (2.1: callback history:week, команда
+    /history и текст панели — один ответ §7.20; событий не создаёт).
+    Состояние перечитывается из БД (guard D5,
     services.state). Произвольный текст (не кнопка) — молча без
     реакции: диалоги заднего числа ведёт backfill.py (задача 4.1 — не
     ломаем), значения настроек — settings_screen.py (фаза
@@ -150,7 +149,7 @@ async def reply_button_message(
     (group=1): MessageHandler backfill.py (группа 0) вне фазы диалога
     молчит, и обновление доходит и до него, и до этого обработчика.
     """
-    from src.handlers import events, hint, settings_screen, undo  # лениво: events/undo импортируют common
+    from src.handlers import events, hint, history, settings_screen, undo  # лениво: events/undo импортируют common
 
     message = update.effective_message
     text = message.text if message is not None else None
@@ -172,9 +171,7 @@ async def reply_button_message(
             await settings_screen.reply_settings_button(update, context, conn, user)
             return
         if text == state.BTN_HISTORY:
-            # Маршрут текста → логика колбэка history:week подключается в
-            # задаче 2.1 (handlers/history.py вне зоны 2.0); сейчас — без
-            # действия и без записи (см. докстринг).
+            await history.reply_history_button(update, context, conn, user)
             return
         kind = state.kind_of_button(text)
         if kind is not None:

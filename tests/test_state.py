@@ -329,24 +329,28 @@ class _FakeRouteContext:
 
 
 def test_reply_button_message_routes_new_buttons(tmp_path):
-    """TC-STATE-009 (ТЗ §6/§10.3, add-settings-history 2.0): обе новые
+    """TC-STATE-009 (ТЗ §6/§10.3, add-settings-history 2.0/2.1): обе новые
     текстовые кнопки панели распознаны common.reply_button_message:
     «⚙️ Настройки» → экран §7.16 (тот же ответ, что callback
-    settings:show / команда /settings); «📊 История за неделю» —
-    распознана как кнопка панели, но БЕЗ ответа и БЕЗ записи событий
-    (обработчик history:week — задача 2.1, вне зоны 2.0; state-ui spec:
-    нажатие не меняет дневник). Произвольный текст — молча."""
+    settings:show / команда /settings); «📊 История за неделю» → экран
+    §7.20 + блок сегодня (задача 2.1 подключила реальный маршрут
+    history:week — санкция ПМ на обновление теста), БЕЗ записи событий
+    (state-ui spec: нажатие не меняет дневник). Произвольный текст —
+    молча."""
     from src import texts
     from src.repositories.sleep_events import SleepEventsRepo
 
     db = tmp_path / "bot.db"
 
-    # «📊 История за неделю»: без записи и без ответа (маршрут 2.1)
+    # «📊 История за неделю»: экран §7.20 (пустые данные — §7.21), без записи
     update = _FakeRouteUpdate(3001, BTN_HISTORY)
     asyncio.run(
         common.reply_button_message(update, _FakeRouteContext(db))  # type: ignore[arg-type]
     )
-    assert update.effective_message.replies == []
+    replies = update.effective_message.replies
+    assert len(replies) == 1
+    assert replies[0].startswith(texts.HISTORY_WEEK_HEADER)
+    assert texts.HISTORY_EMPTY_TODAY in replies[0]
     conn = init_db(db)
     assert SleepEventsRepo(conn).list_by_user(1) == []
 

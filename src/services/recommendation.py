@@ -244,7 +244,13 @@ class RecommendationService:
             # 1. Ключевая цифра — бодрствование с последнего пробуждения
             # (последнее событие здесь всегда wake: незакрытого сна нет,
             # факта подъёма нет → неполные данные).
-            "wake_since_last_wake": self._now - ordered_last_wake(self._events),
+            # Контракт wake_since_last_wake (minor review-001-2.1): при
+            # несогласованном входе (момент расчёта раньше последнего
+            # wake) разница отрицательна — клампится к нулю, в минус
+            # поле не уходит.
+            "wake_since_last_wake": _clamp_zero(
+                self._now - ordered_last_wake(self._events)
+            ),
             # 2. Суммарно за день — BUG-004 через total_wake_at.
             "total_wake": total,
             # 3. Позиция относительно диапазона + остатки до границ
@@ -314,14 +320,17 @@ class RecommendationService:
         # Конфликты якорей (D18): предложение в прошлом (minor-1
         # review-001-1.3) — неосуществимо, время из прошлого не
         # советуем: latest_nap_end обнуляется, флаг feasible=False.
+        # Обычная ветка вместо assert-сужения типа (minor review-001-2.1):
+        # согласованность «feasible ↔ proposal is not None» проверяется
+        # условием, а не инвариантом.
         for conflict in anchor_conflicts(self._events, self._now, self._settings):
             proposal = conflict.latest_nap_end
-            feasible = proposal is not None and proposal >= self._now
-            if feasible:
-                assert proposal is not None  # для сужения типа
+            if proposal is not None and proposal >= self._now:
                 latest_end, latest_line = proposal, _hhmm_line(proposal)
+                feasible = True
             else:
                 latest_end, latest_line = None, None
+                feasible = False
             warnings.append({
                 "type": WARNING_ANCHOR_CONFLICT,
                 "conflicting": conflict.conflicting,

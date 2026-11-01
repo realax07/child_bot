@@ -15,14 +15,16 @@ def register_handlers(application) -> None:
     """Зарегистрировать обработчики задач в Application (вызывает src.main).
 
     Сейчас: команда /start (задача 2.1); колбэки событий и выбора времени
-    §7.10 (задача 2.3, design D2); отмена последней отметки (задача 2.4,
-    design D12); текстовый ввод задним числом в фазе WAIT_EVENT_TIME
-    (задача 4.1, design D10); кнопки §7.13 «Изменить»/«Отменить»
-    (задача 4.4, design D11). Дальнейшие задачи добавляют обработчики сюда же.
+    §7.10 (задача 2.3, design D2); подсказка «⏰ Подсказка сейчас»
+    (add-recommendations 2.2, callback status:show, design D17); отмена
+    последней отметки (задача 2.4, design D12); текстовый ввод задним
+    числом в фазе WAIT_EVENT_TIME (задача 4.1, design D10); кнопки
+    §7.13 «Изменить»/«Отменить» (задача 4.4, design D11). Дальнейшие
+    задачи добавляют обработчики сюда же.
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-    from src.handlers import backfill, common, events, start, undo
+    from src.handlers import backfill, common, events, hint, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
     application.add_handler(
@@ -54,6 +56,10 @@ def register_handlers(application) -> None:
     )
     application.add_handler(
         CallbackQueryHandler(undo.undo_last_callback, pattern=r"^undo:last$")
+    )
+    # «⏰ Подсказка сейчас» (add-recommendations 2.2, ТЗ §10.3, design D17).
+    application.add_handler(
+        CallbackQueryHandler(hint.hint_callback, pattern=r"^status:show$")
     )
     application.add_handler(
         CallbackQueryHandler(

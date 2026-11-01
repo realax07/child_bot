@@ -3,7 +3,8 @@
 #
 # Root cause: меню унифицировано на inline-клавиатуре внутри конкретного
 # сообщения; после диалога панель остаётся в истории чата. Фикс (PLAN-BUG-002):
-# постоянная reply-клавиатура [😴 Заснул] [☀️ Проснулся] [↩️ Отменить последнее]
+# постоянная reply-клавиатура [😴 Заснул] [☀️ Проснулся] [⏰ Подсказка сейчас]
+# [↩️ Отменить последнее]
 # + обработчик текстовых кнопок с guard-перечитыванием состояния (design D5):
 # «не та» кнопка — дружелюбный ответ по факту БЕЗ записи + свежее inline-меню;
 # после отмены — подтверждение + свежее меню; произвольный текст вне диалога —
@@ -27,6 +28,7 @@ from src.handlers.events import PENDING_KIND_KEY
 from src.repositories.sleep_events import SleepEventsRepo
 from src.services.event import get_user
 from src.services.state import (
+    BTN_HINT,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
@@ -109,19 +111,20 @@ def _events(conn, user_id: int) -> list[dict]:
 # ------------------------------------------------------------------ Тесты
 
 
-def test_tc_bug002_001_reply_keyboard_static_three_buttons():
-    """TC-BUG002-001: панель постоянная — статичный список из ровно трёх
-    кнопок [😴 Заснул] [☀️ Проснулся] [↩️ Отменить последнее]; разметка PTB
+def test_tc_bug002_001_reply_keyboard_static_four_buttons():
+    """TC-BUG002-001: панель постоянная — статичный список из ровно четырёх
+    кнопок [😴 Заснул] [☀️ Проснулся] [⏰ Подсказка сейчас]
+    [↩️ Отменить последнее]; разметка PTB
     с resize_keyboard=True и БЕЗ one_time_keyboard (панель не исчезает
     после нажатия — суть хотфикса BUG-002)."""
-    assert REPLY_KEYBOARD == [[BTN_SLEEP, BTN_WAKE, BTN_UNDO]]
-    assert len(REPLY_BUTTONS) == 3
+    assert REPLY_KEYBOARD == [[BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]]
+    assert len(REPLY_BUTTONS) == 4
     markup = common.build_reply_keyboard()
     assert isinstance(markup, ReplyKeyboardMarkup)
     assert markup.resize_keyboard is True
     assert markup.one_time_keyboard is not True
     texts_ = [btn.text for row in markup.keyboard for btn in row]
-    assert texts_ == [BTN_SLEEP, BTN_WAKE, BTN_UNDO]
+    assert texts_ == [BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]
 
 
 def test_tc_bug002_002_sleep_button_when_asleep_refusal_no_record(db_path, conn):

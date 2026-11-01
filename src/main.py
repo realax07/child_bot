@@ -16,6 +16,26 @@ import sys
 from telegram.ext import Application, ApplicationBuilder
 
 
+async def _post_init(application: Application) -> None:
+    """Старт единственного планировщика напоминаний (задача 3.1, design D19).
+
+    Вызывается PTB после инициализации бота (bot готов к send_message).
+    При старте процесса планировщик перестраивается (PB-7 крон-сторож):
+    ре-шедул напоминаний из событий — отработавшие пуши не повторяются.
+    """
+    from src.db import db_path_from_env
+    from src.services.scheduler import start_reminder_scheduler
+
+    start_reminder_scheduler(application.bot, db_path_from_env())
+
+
+async def _post_shutdown(application: Application) -> None:
+    """Останов планировщика при завершении процесса (design D19)."""
+    from src.services.scheduler import shutdown_reminder_scheduler
+
+    shutdown_reminder_scheduler()
+
+
 def build_application() -> Application:
     """Построить async-приложение PTB с токеном из env BOT_TOKEN.
 
@@ -25,7 +45,13 @@ def build_application() -> Application:
     if not token:
         raise SystemExit("Переменная окружения BOT_TOKEN не задана.")
 
-    application = ApplicationBuilder().token(token).build()
+    application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
 
     # Задача 2.3: регистрация обработчиков (команда /start, колбэки событий).
     from src.handlers import register_handlers

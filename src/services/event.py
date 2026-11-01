@@ -47,6 +47,19 @@ def get_user(conn: sqlite3.Connection, telegram_id: int) -> dict:
     return UsersRepo(conn).get_or_create(telegram_id)
 
 
+def _notify_scheduler() -> None:
+    """Точка ре-шедула напоминаний (FR-41, design D19; add-recommendations 3.1).
+
+    Ленивый импорт: services.scheduler читает этот модуль
+    (list_raw_events) — прямой импорт дал бы цикл. Без активного
+    планировщика (тесты сервисов, --check) — no-op (см.
+    scheduler.notify_events_changed).
+    """
+    from src.services import scheduler  # лениво: цикл импорта
+
+    scheduler.notify_events_changed()
+
+
 def create_event(
     conn: sqlite3.Connection,
     user_id: int,
@@ -86,6 +99,7 @@ def create_event(
     event_id = SleepEventsRepo(conn).insert(
         user_id, kind, when_utc, is_backfilled=is_backfilled
     )
+    _notify_scheduler()
     return {
         "id": event_id,
         "user_id": user_id,
@@ -126,9 +140,13 @@ def overwrite_event(
     if kind not in VALID_KINDS:
         raise ValueError(f"недопустимый вид события: {kind!r}")
     _parse_utc(when_utc)  # невалидный формат момента — ValueError, записи нет
-    return SleepEventsRepo(conn).overwrite(
+    updated = SleepEventsRepo(conn).overwrite(
         event_id, event_type=kind, timestamp=when_utc
     )
+    if updated:
+        # FR-41: перезапись — точка ре-шедула напоминаний (design D19).
+        _notify_scheduler()
+    return updated
 
 
 # ------------------------------------------------------- Конфликты (4.4)

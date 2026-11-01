@@ -412,6 +412,55 @@ BACKFILL_TOO_OLD = "Нельзя вводить события старше 3 д
 UNDO_LEFTOVER_EMPTY = "Сегодня записей пока нет."
 
 
+# ------------------------------------------------ Задача 3.1: автонапоминания
+# Пуши §7.23/§7.24 (add-recommendations 3.1, FR-39/FR-40, design D19):
+# формулировки ТЗ дословно, цифры подставляет services.scheduler из расчётов
+# окон (nap_window / night_window / total_wake_at) на момент срабатывания
+# задачи push (§4.7 «пересчитываются при каждом событии»).
+
+
+def reminder_minutes_line(minutes: int) -> str:
+    """§7.23: «Через 15 минут» — N из настройки remind_before (дефолт 15)."""
+    if minutes % 100 in (11, 12, 13, 14):
+        word = "минут"
+    elif minutes % 10 == 1:
+        word = "минута"
+    elif minutes % 10 in (2, 3, 4):
+        word = "минуты"
+    else:
+        word = "минут"
+    return f"Через {minutes} {word}"
+
+
+def reminder_nap_text(
+    minutes_line: str,
+    window_start_line: str,
+    window_end_line: str,
+    total_wake_line: str,
+) -> str:
+    """§7.23: «⏰ Через 15 минут открывается окно дневного сна:
+    13:20–14:00. Бодрствование сейчас: 5 ч 05 мин.»"""
+    return (
+        f"⏰ {minutes_line} открывается окно дневного сна: "
+        f"{window_start_line}–{window_end_line}. "
+        f"Бодрствование сейчас: {total_wake_line}."
+    )
+
+
+def reminder_night_text(
+    total_wake_line: str,
+    target_line: str,
+    deadline_line: str,
+) -> str:
+    """§7.24: «⏰ Пора готовиться ко сну. Суммарное бодрствование:
+    12 ч 05 мин. Целевое время ухода: 22:00, крайнее — 22:30.»"""
+    return (
+        f"⏰ Пора готовиться ко сну. Суммарное бодрствование: "
+        f"{total_wake_line}. Целевое время ухода: {target_line}, "
+        f"крайнее — {deadline_line}."
+    )
+
+
 def undo_done_text(label: str, local_hhmm: str, leftover: str) -> str:
     """Подтверждение отмены с мини-состоянием дневника (PB-4, задача 6.2).
 

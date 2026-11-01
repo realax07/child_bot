@@ -40,6 +40,7 @@ from src.handlers import common
 from src.handlers.events import day_summary_lines
 from src.repositories.sleep_events import SleepEventsRepo
 from src.services import access
+from src.services import scheduler as reminder_scheduler
 from src.services.backfill_parser import resolve_tz
 from src.services.calculation import DEFAULT_DAY_START, day_page_of
 from src.services.event import get_user, list_raw_events
@@ -59,6 +60,17 @@ NOTHING_TO_UNDO = "Отменять нечего: записей пока нет
 # review-001-2.4, note 1: дубль литерала убран). Имя оставлено как алиас
 # для обратной совместимости импортов (тесты).
 OBSERVER_DENIED = texts.OBSERVER_DENIED
+
+
+def _notify_after_delete(deleted: bool) -> None:
+    """Точка ре-шедула напоминаний после удаления записи (FR-41, design D19).
+
+    add-recommendations 3.1: delete — третья мутация событий (ТЗ §8.1).
+    Удаления не было (пустая БД) — план не менялся, ре-шедул не нужен.
+    Без активного планировщика (тесты) — no-op.
+    """
+    if deleted:
+        reminder_scheduler.notify_events_changed()
 
 
 def undo_done_text(
@@ -172,6 +184,7 @@ async def reply_undo_button(
     # (delete_last → bool) не меняется.
     last_event = SleepEventsRepo(conn).last(user["id"])
     deleted = SleepEventsRepo(conn).delete_last(user["id"])
+    _notify_after_delete(deleted)
     confirmation = (
         undo_done_text(conn, user, last_event)
         if deleted and last_event is not None
@@ -213,6 +226,7 @@ async def undo_last_callback(
         # репозитория (delete_last → bool) не меняется.
         last_event = SleepEventsRepo(conn).last(user["id"])
         deleted = SleepEventsRepo(conn).delete_last(user["id"])
+        _notify_after_delete(deleted)
 
         # answerCallbackQuery до redraw/reply (review-001-2.3, note 1):
         # при падении edit/reply пользователь не увидит «часики».

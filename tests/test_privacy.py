@@ -122,8 +122,14 @@ def test_tc_prv_001_db_created_locally_from_env(tmp_path, monkeypatch):
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
-        # Задача 5.3 ничего не меняет в схеме: те же три таблицы (design D3).
-        assert {r[0] for r in rows} == {"users", "sleep_events", "settings"}
+        # Задача 5.3 ничего не меняет в схеме; задача 1.1 add-settings-history
+        # добавляет settings_history (design D3 + ТЗ §9.4).
+        assert {r[0] for r in rows} == {
+            "users",
+            "sleep_events",
+            "settings",
+            "settings_history",
+        }
     finally:
         conn.close()
 
@@ -184,7 +190,7 @@ def test_tc_prv_002_backup_created_locally_next_to_db(tmp_path, monkeypatch):
                 "AND name NOT LIKE 'sqlite_%'"
             )
         }
-        assert tables == {"users", "sleep_events", "settings"}
+        assert tables == {"users", "sleep_events", "settings", "settings_history"}
         assert bk.execute("SELECT telegram_id FROM users").fetchall() == [(4242,)]
     finally:
         bk.close()

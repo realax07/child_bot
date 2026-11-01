@@ -13,7 +13,7 @@ import pytest
 
 from src.db import init_db
 
-EXPECTED_TABLES = {"users", "sleep_events", "settings"}
+EXPECTED_TABLES = {"users", "sleep_events", "settings", "settings_history"}
 
 # Ожидаемые колонки: имя -> (declared type в DDL, notnull по PRAGMA)
 EXPECTED_COLUMNS = {
@@ -69,7 +69,8 @@ def test_db_created_from_scratch(tmp_path):
 
 
 def test_three_tables_exist(db):
-    """TC-DB-002: схема содержит ровно три таблицы пакета 1 (design D3)."""
+    """TC-DB-002: схема содержит ровно четыре таблицы (design D3 + settings_history
+    задачи 1.1 пакета add-settings-history по ТЗ §9.4)."""
     rows = db.execute(
         "SELECT name FROM sqlite_master "
         "WHERE type='table' AND name NOT LIKE 'sqlite_%'"

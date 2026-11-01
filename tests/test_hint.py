@@ -22,10 +22,11 @@ from datetime import datetime, timezone
 import pytest
 
 from src.db import init_db
-from src.handlers import hint
+from src.handlers import common, hint
 from src.handlers.hint import CALLBACK_STATUS_SHOW
 from src.repositories.sleep_events import SleepEventsRepo
 from src.repositories.users import UsersRepo
+from src.services.state import BTN_HINT
 
 
 # ------------------------------------------------------------ Заглушки PTB
@@ -70,6 +71,17 @@ class _FakeUpdate:
         self.effective_user = _FakeUser(user_id)
         self.callback_query = _FakeCallbackQuery(data)
         self.effective_message = self.callback_query.message
+
+
+class _FakeTextUpdate:
+    """Текст с reply-панели (2.2-fix): callback_query нет, есть message.text."""
+
+    def __init__(self, user_id: int, text: str) -> None:
+        self.effective_user = _FakeUser(user_id)
+        self.callback_query = None
+        self.message = _FakeMessage()
+        self.message.text = text
+        self.effective_message = self.message
 
 
 class _FakeContext:
@@ -129,6 +141,17 @@ def _press(db_path, data: str = CALLBACK_STATUS_SHOW, telegram_id: int = 1001):
     update = _FakeUpdate(telegram_id, data)
     context = _FakeContext(db_path)
     asyncio.run(hint.hint_callback(update, context))  # type: ignore[arg-type]
+    return update, context
+
+
+def _press_text(db_path, telegram_id: int = 1001):
+    """Провести ТЕКСТ «⏰ Подсказка сейчас» с reply-панели через общий вход
+    reply_button_message (2.2-fix): тот же маршрут, что у кнопок событий."""
+    update = _FakeTextUpdate(telegram_id, BTN_HINT)
+    context = _FakeContext(db_path)
+    asyncio.run(
+        common.reply_button_message(update, context)  # type: ignore[arg-type]
+    )
     return update, context
 
 
@@ -295,3 +318,50 @@ def test_tc_hint_006_over_target_soft_mark_no_forecast_from_past(
     ) in answer
     assert "Ожидаемое пробуждение" not in answer
     assert _sleep_count(conn, user_id) == 3
+
+
+def test_tc_hint_007_text_button_same_answer_as_callback_no_event(
+    db_path, conn, frozen_now
+):
+    """TC-HINT-007 (ТЗ §6, §10.3 двойной вход, FR-32): текст «⏰ Подсказка
+    сейчас» с reply-панели (2.2-fix) — ТОТ ЖЕ ответ, что у callback
+    status:show (структура §7.6); событие НЕ создаётся (0 новых записей);
+    отдельного текста-ошибки нет (кнопка валидна бодрствующему)."""
+    user_id = _uid(conn)
+    _seed_rise(conn, user_id)
+
+    text_update, _ = _press_text(db_path)
+    callback_update, _ = _press(db_path)
+
+    assert len(text_update.effective_message.replies) == 1
+    assert (
+        text_update.effective_message.replies[0]
+        == callback_update.effective_message.replies[0]
+    )
+    assert "Окно дневного сна: 13:20–14:00." in text_update.effective_message.replies[0]
+    assert _sleep_count(conn, user_id) == 2  # событие НЕ создано
+
+
+def test_tc_hint_008_text_button_asleep_rereads_state_no_event(
+    db_path, conn, monkeypatch
+):
+    """TC-HINT-008 (ТЗ §6 «в ОБОИХ состояниях», FR-33, design D5): текст
+    «⏰ Подсказка сейчас» с панели спящему — ответ §7.7, идентичный
+    callback; состояние перечитывается из БД (не по фазе клавиатуры);
+    записей в sleep_events не добавляется."""
+    monkeypatch.setattr(hint, "datetime", _frozen(
+        datetime(2026, 11, 3, 11, 15, tzinfo=timezone.utc)  # 14:15 МСК
+    ))
+    user_id = _uid(conn)
+    _seed_rise(conn, user_id)
+    SleepEventsRepo(conn).insert(user_id, "sleep", "2026-11-03 10:30:00")  # 13:30 МСК
+
+    text_update, _ = _press_text(db_path)
+    callback_update, _ = _press(db_path)
+
+    answer = text_update.effective_message.replies[0]
+    assert answer.splitlines()[0] == "Сон идёт с 13:30 (уже 45 мин)."
+    assert text_update.effective_message.replies == (
+        callback_update.effective_message.replies
+    )
+    assert _sleep_count(conn, user_id) == 3  # событие НЕ создано

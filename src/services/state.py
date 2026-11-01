@@ -25,9 +25,11 @@ from src.repositories.sleep_events import SleepEventsRepo
 STATE_AWAKE = "awake"
 STATE_ASLEEP = "asleep"
 
-# Тексты кнопок меню (ТЗ §6): ровно одна событийная + «Отменить последнее».
+# Тексты кнопок меню (ТЗ §6): события + «⏰ Подсказка сейчас» (FR-32,
+# 2.2-fix) + «Отменить последнее».
 BTN_SLEEP = "😴 Заснул"
 BTN_WAKE = "☀️ Проснулся"
+BTN_HINT = "⏰ Подсказка сейчас"
 BTN_UNDO = "↩️ Отменить последнее"
 
 # callback_data кнопок (контракты задач 2.3/2.4).
@@ -44,10 +46,13 @@ KIND_UNDO = "undo"
 # видна всегда и не зависит от прокрутки истории чата — root cause BUG-002
 # в том, что inline-меню живёт в конкретном сообщении. Статичный список
 # безопасен: guard D5 (is_stale_callback) перечитывает состояние из БД на
-# каждое нажатие, «не та» кнопка не создаёт запись (см. handlers/common.py).
+# «не та» кнопка не создаёт запись (см. handlers/common.py). Подсказка —
+# текстовая кнопка без события (FR-32): маршрут текста → hint.py (2.2-fix).
 # Чистые данные (без PTB-объектов): ReplyKeyboardMarkup строит слой handlers.
-REPLY_KEYBOARD: list[list[str]] = [[BTN_SLEEP, BTN_WAKE, BTN_UNDO]]
-REPLY_BUTTONS: tuple[str, ...] = (BTN_SLEEP, BTN_WAKE, BTN_UNDO)
+# ТЗ §6: события и подсказка в одной строке; клавиатура ОБЩАЯ для обоих
+# состояний — «⏰ Подсказка сейчас» валидна и бодрствующему, и спящему.
+REPLY_KEYBOARD: list[list[str]] = [[BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]]
+REPLY_BUTTONS: tuple[str, ...] = (BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO)
 
 _KIND_BY_STATE_BUTTON = {
     BTN_SLEEP: KIND_SLEEP,

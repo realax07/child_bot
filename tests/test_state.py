@@ -33,6 +33,9 @@ from src.handlers.common import (
 from src.repositories.sleep_events import SleepEventsRepo
 from src.repositories.users import UsersRepo
 from src.services.state import (
+    BTN_HINT,
+    REPLY_BUTTONS,
+    REPLY_KEYBOARD,
     STATE_ASLEEP,
     STATE_AWAKE,
     build_menu,
@@ -231,3 +234,24 @@ def test_redraw_menu_repaints_actual_keyboard(conn):
         callback_query = None
 
     asyncio.run(common.redraw_menu(_NoCallback(), conn, user_id))  # type: ignore[arg-type]
+
+
+def test_reply_panel_has_hint_button_in_both_states(conn):
+    """TC-STATE-007 (ТЗ §6, FR-32, задача 2.2-fix): постоянная reply-панель
+    содержит «⏰ Подсказка сейчас» рядом с событийными кнопками; клавиатура
+    ОБЩАЯ для обоих состояний (панель статична, состояние перечитывается на
+    нажатие — design D5). Событийная inline-кнопка по-прежнему ровно одна
+    (TC-STATE-005 не задет); текст кнопки — не событие (kind_of_button →
+    None, FR-32: подсказка не создаёт запись)."""
+    assert BTN_HINT == "⏰ Подсказка сейчас"  # ТЗ §6 дословно
+    flat = [t for row in REPLY_KEYBOARD for t in row]
+    assert flat == [BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO]
+    assert REPLY_BUTTONS == (BTN_SLEEP, BTN_WAKE, BTN_HINT, BTN_UNDO)
+    assert len(REPLY_KEYBOARD) == 1  # события и подсказка — одна строка
+
+    markup = common.build_reply_keyboard()
+    texts_ = [btn.text for row in markup.keyboard for btn in row]
+    assert BTN_HINT in texts_
+
+    # Подсказка — не событийная кнопка: route определяется в common, kind нет.
+    assert kind_of_button(BTN_HINT) is None

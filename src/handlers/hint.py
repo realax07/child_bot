@@ -21,6 +21,10 @@
 # моменты окон «ЧЧ:ММ», доклад конфликтов из anchor_conflicts): дословные
 # §7.6–7.9 добавит задача 2.3 в src/texts.py — здесь их НЕТ.
 #
+# 2.2-fix (ТЗ §6): кнопка есть и в постоянной reply-панели — там она
+# присылает ТЕКСТ «⏰ Подсказка сейчас»; маршрут текста reply_button_message
+# → reply_hint_button: та же логика (_current_status), событие не создаётся.
+#
 # design D4: события хранятся в UTC; расчёт — в локальном наивном времени
 # пользователя (users.timezone через zoneinfo, resolve_tz).
 #
@@ -209,6 +213,23 @@ def hint_text(status: dict) -> str:
 # --------------------------------------------------------- Обработчик
 
 
+def _current_status(conn: sqlite3.Connection, user: dict) -> dict:
+    """Свежий статус подсказки из БД (design D5) — общий вход обоих маршрутов.
+
+    События и настройки перечитываются при КАЖДОМ вызове (без кэша) —
+    callback status:show и текст reply-панели отвечают по одному и тому
+    же свежему состоянию (ТЗ §10.3: двойной вход, одна логика).
+    """
+    tz_name = user["timezone"]
+    now_local = _local_naive(datetime.now(timezone.utc), tz_name)
+    raw_events = [
+        (row["event_type"], _local_naive(row["timestamp"], tz_name))
+        for row in list_raw_events(conn, user["id"])
+    ]
+    settings_map = SettingsService(conn).get_all(user["id"])
+    return RecommendationService(raw_events, now_local, settings_map).status()
+
+
 async def hint_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Нажатие «⏰ Подсказка сейчас» → мгновенный ответ (FR-32…FR-34).
 
@@ -225,20 +246,31 @@ async def hint_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     conn: sqlite3.Connection = common.open_conn(context)
     try:
         user = get_user(conn, update.effective_user.id)
-        # design D5: события и настройки — СВЕЖИЕ из БД на каждое нажатие
-        # (guard по образцу событий: «устаревшее» нажатие отвечает по
-        # актуальному состоянию и ничего не пишет — записей здесь нет).
-        tz_name = user["timezone"]
-        now_local = _local_naive(datetime.now(timezone.utc), tz_name)
-        raw_events = [
-            (row["event_type"], _local_naive(row["timestamp"], tz_name))
-            for row in list_raw_events(conn, user["id"])
-        ]
-        settings_map = SettingsService(conn).get_all(user["id"])
-        status = RecommendationService(raw_events, now_local, settings_map).status()
+        status = _current_status(conn, user)
 
         await query.answer()
         if update.effective_message is not None:
             await update.effective_message.reply_text(hint_text(status))
     finally:
         conn.close()
+
+
+async def reply_hint_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    conn: sqlite3.Connection,
+    user: dict,
+) -> None:
+    """Текст «⏰ Подсказка сейчас» с reply-панели (ТЗ §6, 2.2-fix).
+
+    Reply-кнопка присылает ТЕКСТ — общий вход reply_button_message
+    (группа 1, BUG-002) роутит его сюда; логика ТА ЖЕ, что у callback
+    status:show (_current_status, ТЗ §10.3 — двойной вход). Событие НЕ
+    создаётся (FR-32); состояние перечитывается из БД (design D5 —
+    отдельный guard не нужен: подсказка валидна в обоих состояниях);
+    observer'у доступна (design D13). Сигнатура — как reply_undo_button.
+    """
+    if update.effective_message is None:
+        return
+    status = _current_status(conn, user)
+    await update.effective_message.reply_text(hint_text(status))

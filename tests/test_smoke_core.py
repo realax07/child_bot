@@ -41,6 +41,7 @@ from src.repositories.sleep_events import SleepEventsRepo
 from src.services.event import get_user
 from src.services.settings import SettingsService
 from src.services.state import (
+    BTN_HINT,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
@@ -396,6 +397,7 @@ class TestSmokeCore:
         # Кнопки меню ТЗ §6 дословно
         assert BTN_SLEEP == "😴 Заснул"
         assert BTN_WAKE == "☀️ Проснулся"
+        assert BTN_HINT == "⏰ Подсказка сейчас"  # 2.2-fix: FR-32, ТЗ §6
         assert BTN_UNDO == "↩️ Отменить последнее"
 
     def test_tc_smoke_003_bot_application_boots(self):

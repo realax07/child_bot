@@ -29,6 +29,7 @@ from src.db import init_db
 from src.services import state
 from src.services.event import get_user
 from src.services.state import (
+    BTN_HINT,
     BTN_SLEEP,
     BTN_UNDO,
     BTN_WAKE,
@@ -44,6 +45,7 @@ __all__ = [
     "BTN_SLEEP",
     "BTN_WAKE",
     "BTN_UNDO",
+    "BTN_HINT",
     "CALLBACK_SLEEP",
     "CALLBACK_WAKE",
     "CALLBACK_UNDO",
@@ -124,14 +126,17 @@ async def reply_button_message(
     """Нажатие кнопки постоянной reply-панели (BUG-002, п. 2 плана).
 
     ReplyKeyboard присылает ТЕКСТ кнопки — вид события определяется по
-    тексту (state.kind_of_button / BTN_UNDO). Состояние перечитывается
+    тексту (state.kind_of_button / BTN_UNDO); «⏰ Подсказка сейчас»
+    (BTN_HINT) — текстовый маршрут к логике подсказки hint.py (ТЗ §6,
+    2.2-fix: callback status:show и текст панели — двойной вход, ТЗ
+    §10.3). Состояние перечитывается
     из БД (guard D5, services.state). Произвольный текст (не кнопка) —
     молча без реакции: диалоги заднего числа ведёт backfill.py (задача
     4.1 — не ломаем). Регистрируется в ОТДЕЛЬНОЙ группе PTB (group=1):
     MessageHandler backfill.py (группа 0) вне фазы диалога молчит, и
     обновление доходит и до него, и до этого обработчика.
     """
-    from src.handlers import events, undo  # лениво: events/undo импортируют common
+    from src.handlers import events, hint, undo  # лениво: events/undo импортируют common
 
     message = update.effective_message
     text = message.text if message is not None else None
@@ -145,6 +150,9 @@ async def reply_button_message(
         user = get_user(conn, update.effective_user.id)
         if text == state.BTN_UNDO:
             await undo.reply_undo_button(update, context, conn, user)
+            return
+        if text == state.BTN_HINT:
+            await hint.reply_hint_button(update, context, conn, user)
             return
         kind = state.kind_of_button(text)
         if kind is not None:

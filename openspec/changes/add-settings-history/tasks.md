@@ -9,17 +9,17 @@
 
 ## Волна 1. Настройки с UI и settings_history
 
-- [ ] 1.1 SettingsService.update + settings_history-запись `[P]`
+- [x] 1.1 SettingsService.update + settings_history-запись `[P]`
   - Зона: `src/services/settings.py` (метод update + валидация по типам DEFAULT_KEYS), `src/repositories/settings.py` (SettingsHistoryRepo), `src/db.py` (CREATE TABLE IF NOT EXISTS settings_history — ТЗ §9.4, идемпотентно, без миграции данных), `tests/test_settings_history.py` (новый)
   - Сделать: `update(user_id, key, value) -> (old, new)`: валидация формата по типу ключа (длительность `5:20`/`5ч20м`/минуты; `HH:MM`; число; физический смысл: не-отрицательность, min ≤ max), ошибка → исключение/None без изменений; успех → обновление settings + INSERT в settings_history (user_id, key, old, new, changed_at) в одной операции — «обновили без записи» и «записали без обновления» запрещены; физическая запись истории при ошибке — запрещена.
   - Трассировка: FR-44, FR-45, FR-46; design D21; research DEFAULT_KEYS, §9.4.
   - Готовность: юнит-тесты: wake_deadline 15:30→15:40 даёт строку истории old=15:30/new=15:40; «полтора часа» → отказ без записи; min>max → отказ; settings_history создается init_db по §9.4. TC-кейсы TC-SETT-0xx (approved) → тесты с TC-трассировкой в docstring.
-- [ ] 1.2 Экран настроек и диалог изменения `[P]`
+- [x] 1.2 Экран настроек и диалог изменения `[P]`
   - Зона: `src/handlers/settings_screen.py` (новый: callback settings:show, settings:edit:<key>, FSM WAIT_SETTING_VALUE), `src/texts.py` (§7.16–7.19 дословно), `src/handlers/__init__.py`, `src/main.py` (регистрация), `src/handlers/common.py` (маршрутизация «⚙️ Настройки»), `tests/test_settings_screen.py` (новый)
   - Сделать: экран §7.16: группы «Режим дня / Ночной сон / Бодрствование / Прочее», текущие значения пользователя; нажатие параметра → запрос значения §7.17 (имя, текущее, формат); успех → §7.18 «старое → новое»; ошибка → §7.19 без изменений. Состав экрана: 12 параметров §7.16 + target_nap_duration в «Прочее» (13-й ключ, дополнение к §7.16 — допущение D21). Кнопка «⚙️ Настройки» и команда /settings — оба состояния меню, события не создаются; редактирование — только parent.
   - Трассировка: FR-42, FR-43, FR-45, FR-47; design D21; ТЗ §6, §10.2–10.4.
   - Готовность: юнит-тесты: экран содержит все группы и значения; диалог §7.17 с текущим значением; успешная правка меняет окно следующего расчёта (связка с FR-24); «⚙️ Настройки» не пишет в sleep_events; наблюдатель read-only. TC-кейсы TC-SETT-0xx → тесты с TC-трассировкой.
-- [ ] 1.3 Уборка техдолга пакета 2 `[P]`
+- [x] 1.3 Уборка техдолга пакета 2 `[P]`
   - Зона: `src/services/calculation.py`, `src/handlers/events.py`, `src/handlers/undo.py`, `src/services/scheduler.py`, `src/repositories/users.py`, `src/texts.py` — по факту дубликатов (раздел бэклога «Техдолг пакета 2»); правки тестов тех же зон
   - Сделать: дубли хелперов undo/events → единые хелперы (2.1); read-only SQL owner_users в scheduler.py → метод UsersRepo (3.1); мёртвая daily_summary().total_wake → удалить (1.2); лишний nap_window_text в §7.5-ветке events.py → снять (2.3); литеральные дефолты §5 продублированы локальным dict → свести на DEFAULT_KEYS (2.3). Поведения НЕ менять — рефакторинг с зелёным регрессом.
   - Трассировка: backlog «Техдолг пакета 2» (2.1, 2.3, 3.1, 1.2); PLAN волна 1; design D21 (единый источник ключей).

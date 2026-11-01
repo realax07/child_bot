@@ -19,9 +19,11 @@
 # строка «Крайнее пробуждение: …» НЕ выводится вовсе (решение продакта
 # 29.10: норма постоянна; wake_deadline остаётся в настройках — Пакет 3 —
 # и в подсказках Пакета 2, из расчётов не удалён).
-# FR-8 (в ред. волны 6, PB-3): wake «сейчас» → §7.2: подтверждающая строка
-# + сводка событий дня; строка окна дневного сна в этом пакете НЕ выводится
-# (окна — Пакет 2).
+# FR-8 (в ред. PB-3 + FR-38, задача 2.3): wake «сейчас» → §7.2:
+# подтверждающая строка + строка окна дневного сна от фактического
+# подъёма (calculation.nap_window, design D16/D20; §7.3/§7.4-стиль при
+# раннем/позднем подъёме — якоря из настроек) + сводка событий дня;
+# подавление окон волны 6 снято.
 # design D4: время хранится в UTC; в текстах ответов — локальное время
 # пользователя (users.timezone через zoneinfo).
 #
@@ -47,6 +49,7 @@ from src.services.calculation import (
     DEFAULT_DAY_START,
     day_facts_lines,
     day_page_of,
+    nap_window,
 )
 from src.services.event import create_event, get_user, list_raw_events
 from src.services.settings import SettingsService
@@ -89,17 +92,38 @@ def fell_asleep_text(local_hhmm: str, summary_lines: Iterable[str]) -> str:
     )
 
 
-def woke_up_text(local_hhmm: str, summary_lines: Iterable[str]) -> str:
-    """§7.2: подтверждающая строка + сводка событий дня (FR-8 в ред.
-    волны 6, PB-3).
+def woke_up_text(
+    local_hhmm: str,
+    summary_lines: Iterable[str],
+    window_line: str | None = None,
+) -> str:
+    """§7.2 (FR-8 в ред. PB-3 + FR-38, задача 2.3 / design D20):
+    подтверждающая строка + строка окна дневного сна + сводка событий дня.
 
-    Строка «Окно дневного сна: …» не выводится — окна расчётов Пакет 2.
-    Строки сводки строит calculation.day_facts_lines (единая точка).
+    Подавление окон волны 6 СНЯТО: окно считается ОТ ФАКТИЧЕСКОГО
+    подъёма страницы (calculation.nap_window, design D16 — не хардкод),
+    стандартный/ранний/поздний подъём — §7.2/§7.3/§7.4-стиль; якоря
+    раннего/позднего текста — из настроек (design D14). Сводка PB-3 —
+    БЕЗ изменений (факты дня + «Бодрствование общее» BUG-004, строки
+    строит calculation.day_facts_lines — единая точка). Окна нет (факта
+    «Подъем» нет — окно от ненастоящего подъёма не строим, FR-34-стиль)
+    — ответ как в волне 6.
     """
-    return f"✅ Пробуждение записано в {local_hhmm}.\n" + "\n".join(summary_lines)
+    lines = [f"✅ Пробуждение записано в {local_hhmm}."]
+    if window_line is not None:
+        lines.append(window_line)
+    lines.extend(summary_lines)
+    return "\n".join(lines)
 
 
 # ------------------------------------------------- Сводка событий дня (PB-3)
+
+#: Лимит растяжения первого бодрствования при раннем подъёме (§3.6,
+#: «тянем до 13:00») — ТОТ ЖЕ аргументный дефолт, что у
+#: calculation.nap_window (ключа-настройки нет); передаётся в расчёт
+#: явно и подставляется в текст §7.3 — единый источник значения.
+NAP_STRETCH_LIMIT = time(13, 0)
+
 
 def _local_naive(utc_moment: str | datetime, tz_name: str | None) -> datetime:
     """UTC-момент (строка БД «YYYY-MM-DD HH:MM:SS» или datetime) →
@@ -151,6 +175,76 @@ def day_summary_lines(
         now_local=now_local,
         merge_threshold_min=threshold,
     )
+
+
+def nap_window_text(
+    conn: sqlite3.Connection, user: dict, ref_utc: str | datetime
+) -> str | None:
+    """Строка окна дневного сна для подтверждений (FR-38, задача 2.3,
+    design D20) или None — факта «Подъем» страницы нет.
+
+    Окно — calculation.nap_window (ЕДИНСТВЕННАЯ точка расчёта, design
+    D16: окно от фактического подъёма страницы, не хардкод); расчётный
+    момент — локальное время ref_utc (для «Сейчас» — момент записи, для
+    заднего числа — момент вводимого события: окно страницы ввода).
+    Вариант текста — по флагам отклонений §3.6 из NapWindow:
+      - stretch_to_limit → §7.3 (ранний подъём): совет «до лимита» +
+        окно + якоря wake_deadline (из расчёта) и night_target
+        (настройка);
+      - after_deadline → §7.4 (поздний подъём): окно + якоря
+        wake_deadline и night_deadline (настройка);
+      - иначе §7.2 — просто строка окна.
+    События и настройки читаются при каждом вызове (FR-24, design D14);
+    сборка текста — templates texts.nap_window_*.
+    """
+    user_id = user["id"]
+    tz_name = user["timezone"]
+    settings = SettingsService(conn).get_all(user_id)
+
+    raw_events = [
+        (row["event_type"], _local_naive(row["timestamp"], tz_name))
+        for row in list_raw_events(conn, user_id)
+    ]
+    ref_local = _local_naive(ref_utc, tz_name)
+    nap = nap_window(
+        raw_events,
+        ref_local,
+        settings,
+        stretch_limit=NAP_STRETCH_LIMIT,
+    )
+    if nap is None:
+        return None
+
+    start_line = f"{nap.start:%H:%M}"
+    end_line = f"{nap.end:%H:%M}"
+    deadline_line = f"{nap.wake_deadline:%H:%M}"
+    if nap.stretch_to_limit:
+        return texts.nap_window_early_text(
+            f"{NAP_STRETCH_LIMIT:%H:%M}",
+            start_line,
+            end_line,
+            deadline_line,
+            _settings_hhmm(settings, "night_target"),
+        )
+    if nap.after_deadline:
+        return texts.nap_window_late_text(
+            start_line,
+            end_line,
+            deadline_line,
+            _settings_hhmm(settings, "night_deadline"),
+        )
+    return texts.nap_window_line(start_line, end_line)
+
+
+def _settings_hhmm(settings: dict, key: str) -> str:
+    """Якорь-настройка «ЧЧ:ММ» (design D14) для текстов окон §7.3/§7.4.
+
+    Ключ не задан (SettingsService.get_all отдаёт только DEFAULT_KEYS —
+    seed при /start; расчёты без него берут аргументные дефолты) —
+    дефолт ТЗ §5: night_target 22:00, night_deadline 22:30.
+    """
+    defaults = {"night_target": "22:00", "night_deadline": "22:30"}
+    return str(settings.get(key, defaults[key]))
 
 
 # ------------------------------------------------------------- Помощники
@@ -401,11 +495,17 @@ async def time_choose_callback(
         # Сводка — ЕДИНАЯ точка сборки (PB-3): события и настройки читаются
         # ПОСЛЕ записи события — факт уже в списке (расчётный момент — now).
         summary_lines = day_summary_lines(conn, user, now_utc)
+        # Строка окна — от фактического подъёма страницы (FR-38, D20):
+        # тот же расчётный момент, что у сводки; None — факта «Подъем»
+        # нет (окно от ненастоящего подъёма не строим).
+        window_line = nap_window_text(conn, user, now_utc)
         if kind == KIND_SLEEP:
+            # §7.5: БЕЗ строки окна (design D20: показ окон в §7.5
+            # отклонён) и БЕЗ «Крайнего пробуждения» (решение 29.10).
             answer = fell_asleep_text(local_hhmm, summary_lines)
         else:
-            # FR-8: подтверждающая строка + сводка; без строки окна (Пакет 2).
-            answer = woke_up_text(local_hhmm, summary_lines)
+            # FR-8: подтверждающая строка + окно + сводка PB-3 без изменений.
+            answer = woke_up_text(local_hhmm, summary_lines, window_line)
         if update.effective_message is not None:
             await update.effective_message.reply_text(answer)
     finally:

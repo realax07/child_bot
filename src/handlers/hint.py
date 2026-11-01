@@ -17,9 +17,10 @@
 # design D13: observer — подсказка ДОСТУПНА (чтение, без ограничений);
 # проверки роли нет, denying-ветки нет.
 #
-# Тексты — СТРУКТУРНЫЕ фрагменты сервиса (длительности texts.format_duration,
-# моменты окон «ЧЧ:ММ», доклад конфликтов из anchor_conflicts): дословные
-# §7.6–7.9 добавит задача 2.3 в src/texts.py — здесь их НЕТ.
+# Тексты — дословные §7.6–7.9 из src/texts.py (задача 2.3): рендер
+# подставляет цифры RecommendationService в формулировки ТЗ; служебные
+# формулировки вне ТЗ (позиция в/выше диапазона, ночное окно, мягкая
+# отметка FR-37, конфликты якорей D18, неполные данные) — тоже там.
 #
 # 2.2-fix (ТЗ §6): кнопка есть и в постоянной reply-панели — там она
 # присылает ТЕКСТ «⏰ Подсказка сейчас»; маршрут текста reply_button_message
@@ -76,11 +77,12 @@ def _local_naive(utc_moment: str | datetime, tz_name: str | None) -> datetime:
 
 
 def _awake_fragment(status: dict) -> str:
-    """Структура §4.6 из 5 пунктов для статуса «бодрствует» (FR-32).
+    """§7.6 дословно (FR-32): структура §4.6 из 5 пунктов для статуса
+    «бодрствует» — формулировки ТЗ подставляют цифры сервиса
+    (texts.hint_awake_text и строки позиции/окна/предупреждений).
 
     Время «сейчас» и слово состояния не выводятся (ТЗ §4.6): только
     длительности, остатки до границ, окно следующего сна и предупреждения.
-    Дословные формулировки §7.6 — задача 2.3.
     """
     bounds = status["bounds"]
     lower_line = texts.format_duration(bounds["lower"])
@@ -88,120 +90,102 @@ def _awake_fragment(status: dict) -> str:
 
     position = status["position"]
     if position == POSITION_BELOW:
-        position_line = (
-            f"До нижней границы ({lower_line}) осталось: "
-            f"{texts.format_duration(status['remaining_to_lower'])}. "
-            f"До верхней границы ({upper_line}) осталось: "
-            f"{texts.format_duration(status['remaining_to_upper'])}."
+        position_line = texts.hint_position_below_line(
+            lower_line,
+            texts.format_duration(status["remaining_to_lower"]),
+            upper_line,
+            texts.format_duration(status["remaining_to_upper"]),
         )
     elif position == POSITION_ABOVE:
-        position_line = (
-            f"Суммарное бодрствование превысило верхнюю границу ({upper_line})."
-        )
+        position_line = texts.hint_position_above_line(upper_line)
     else:
-        position_line = (
-            f"Бодрствование в границах {lower_line}–{upper_line}. "
-            f"До верхней границы осталось: "
-            f"{texts.format_duration(status['remaining_to_upper'])}."
+        position_line = texts.hint_position_in_line(
+            lower_line,
+            upper_line,
+            texts.format_duration(status["remaining_to_upper"]),
         )
 
     window = status["next_window"]
     if window["kind"] == "nap":
-        window_line = f"Окно дневного сна: {window['start_line']}–{window['end_line']}."
+        window_line = texts.hint_nap_window_line(
+            window["start_line"], window["end_line"]
+        )
         if window["stretch_to_limit"]:
             # Ранний подъём (§3.6): окно уже до лимита — совет тянуть до конца.
-            window_line += " Сегодня можно растянуть до конца окна."
+            window_line += texts.HINT_STRETCH_SUFFIX
     else:
-        window_line = (
-            f"Окно ухода в ночь: около {window['recommended_line']} "
-            f"(крайнее {window['deadline_line']})."
+        window_line = texts.hint_night_window_line(
+            window["recommended_line"], window["deadline_line"]
         )
 
-    lines = [
-        "Бодрствование с последнего пробуждения: "
-        f"{texts.format_duration(status['wake_since_last_wake'])}. "
-        f"Суммарно за сегодня: {texts.format_duration(status['total_wake'])}.",
+    return texts.hint_awake_text(
+        texts.format_duration(status["wake_since_last_wake"]),
+        texts.format_duration(status["total_wake"]),
         position_line,
-        "",
         window_line,
-    ]
-    lines.extend(_warning_lines(status["warnings"]))
-    return "\n".join(lines)
+        _warning_lines(status["warnings"]),
+    )
 
 
 def _warning_lines(warnings: list[dict]) -> list[str]:
-    """Предупреждения (п. 5 структуры §4.6) — строками с цифрами.
-
-    Дословные §7.8/§7.9 — задача 2.3; здесь структурные формулировки
-    из полей сервиса (цифры — из расчётов, не хардкод).
-    """
+    """Предупреждения (п. 5 структуры §4.6) — дословные §7.8/§7.9 с
+    цифрами из полей сервиса (не хардкод); конфликты якорей — D18."""
     lines: list[str] = []
     for warning in warnings:
         kind = warning["type"]
         if kind == WARNING_LATE_NAP:
-            lines.append(
-                f"⚠️ Если сон начнётся в {warning['nap_start_line']}, он "
-                f"закончится около {warning['forecast_end_line']} — позже "
-                f"крайнего времени {warning['deadline_line']}. "
-                "Ночной сон может сдвинуться."
-            )
+            lines.append(texts.late_nap_warning_text(
+                warning["nap_start_line"],
+                warning["forecast_end_line"],
+                warning["deadline_line"],
+            ))
         elif kind == WARNING_OVERTIRED:
-            lines.append(
-                f"⚠️ Бодрствование {warning['total_wake_line']} — превышена "
-                f"верхняя граница ({warning['upper_line']}). "
-                "Постарайтесь уложить ребёнка как можно скорее."
-            )
+            lines.append(texts.overtired_warning_text(
+                warning["total_wake_line"]
+            ))
         elif kind == WARNING_ANCHOR_CONFLICT:
             anchors = " против ".join(warning["conflicting"])
-            lines.append(f"⚠️ Якоря в противоречии: {anchors}. {warning['accepted']}.")
+            lines.append(texts.anchor_conflict_warning_line(
+                anchors, warning["accepted"]
+            ))
     return lines
 
 
 def _asleep_fragment(status: dict) -> str:
-    """Статус спящему §7.7 (FR-33): сколько спит, прогноз пробуждения
+    """§7.7 дословно (FR-33): сколько спит, прогноз пробуждения
     (дневной сон — от цели из настроек), прогноз бодрствования после.
 
     «Пора укладывать» спящему НЕ выдаётся (FR-33). Незавершённый дневной
     сон дольше цели — мягкая отметка (FR-37), без пуша (ОВ-4.1). У ночного
     сна прогнозов нет — только факт «сколько спит» (D17, честный None).
     """
-    lines = [
-        f"Сон идёт с {status['sleep_start_line']} (уже {status['duration_line']})."
-    ]
-    if status["forecast_wake_line"] is not None:
-        lines.append(
-            f"Ожидаемое пробуждение: около {status['forecast_wake_line']}."
-        )
-    if status["forecast_total_wake_line"] is not None:
-        lines.append(
-            "После пробуждения суммарное бодрствование составит около "
-            f"{status['forecast_total_wake_line']}."
-        )
     over = status["over_target"]
-    if over is not None:
-        lines.append(
-            f"Сон идёт дольше обычного: {over['duration_line']} "
-            f"при обычной цели {over['target_line']}."
+    over_line = (
+        texts.hint_over_target_line(
+            over["duration_line"], over["target_line"]
         )
-    return "\n".join(lines)
+        if over is not None
+        else None
+    )
+    return texts.hint_sleeping_text(
+        status["sleep_start_line"],
+        status["duration_line"],
+        status["forecast_wake_line"],
+        status["forecast_total_wake_line"],
+        over_line,
+    )
 
 
 def _incomplete_fragment() -> str:
     """Неполные данные (FR-34): факта «Подъем» страницы нет — «0 ч» и
     окна не выводятся, просьба отметить события (ТЗ §7.14-стиль)."""
-    return (
-        "Пока нет факта подъёма за сегодня — данных для подсказки мало.\n"
-        "Отметьте «☀️ Проснулся» или введите время задним числом, "
-        "и я посчитаю окна."
-    )
+    return texts.HINT_INCOMPLETE
 
 
 def hint_text(status: dict) -> str:
-    """Структурный ответ подсказки по состоянию из RecommendationService.
-
-    Единая точка рендера для задачи 2.2: дословные тексты §7.6–7.9
-    заменит задача 2.3 (src/texts.py).
-    """
+    """Ответ подсказки по состоянию из RecommendationService: дословные
+    тексты §7.6–7.9 (texts.py, задача 2.3) с цифрами статуса; логика
+    состояний — без изменений (design D17)."""
     state = status["state"]
     if state == STATE_AWAKE:
         return _awake_fragment(status)

@@ -10,23 +10,29 @@ RecommendationService без записи в sleep_events (FR-32), структ�
 
 Каждый тест помечен TC-HINT-xxx в первой строке докстринга (rule 6).
 Время фиксировано (frozen_now, monkeypatch hint.datetime): 09:30 UTC =
-12:30 МСК — ассерты без «живых» ЧЧ:ММ. Тексты ответа — структурные
-фрагменты сервиса: дословные §7.6–7.9 добавит задача 2.3.
+12:30 МСК — ассерты без «живых» ЧЧ:ММ. Тексты ответа — дословные
+§7.6–7.9 из src/texts.py (задача 2.3): рендер подставляет цифры сервиса
+в формулировки ТЗ; дословность эталону ТЗ фиксирует TC-HINT-009.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
+from src import texts
 from src.db import init_db
 from src.handlers import common, hint
 from src.handlers.hint import CALLBACK_STATUS_SHOW
 from src.repositories.sleep_events import SleepEventsRepo
 from src.repositories.users import UsersRepo
 from src.services.state import BTN_HINT
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SPEC_FILE = _REPO_ROOT / "ТЗ_Дневник_сна_ребёнка.md"
 
 
 # ------------------------------------------------------------ Заглушки PTB
@@ -198,6 +204,10 @@ def test_tc_hint_001_awake_answer_7_6_structure_no_time_no_state(
         "До верхней границы (12 ч 30 мин) осталось: 8 ч."
     ) in answer
     assert "Окно дневного сна: 13:20–14:00." in answer
+    # ДОСЛОВНО §7.6: при стандартном подъёме 08:00 (запрос 12:30, позиция
+    # «ниже», предупреждений нет) ответ совпадает с эталонной цитатой ТЗ
+    # побайтно (задача 2.3, AC-6; числа ТЗ совпали с фактическими).
+    assert answer == texts.HINT_AWAKE
     # Время «сейчас» и слово состояния не выводятся (ТЗ §4.6).
     assert "12:30" not in answer
     assert "бодрствует" not in answer
@@ -223,8 +233,10 @@ def test_tc_hint_002_asleep_answer_7_7_no_put_to_sleep_advice(
     assert _sleep_count(conn, user_id) == 3  # запись НЕ создана
     assert len(update.effective_message.replies) == 1
     answer = update.effective_message.replies[0]
-    assert answer.splitlines()[0] == "Сон идёт с 13:30 (уже 45 мин)."
-    assert "Ожидаемое пробуждение: около 15:00." in answer
+    # §7.7 дословно (задача 2.3): факт и прогноз — ОДНОЙ строкой, как в ТЗ.
+    assert answer.splitlines()[0] == (
+        "Сон идёт с 13:30 (уже 45 мин). Ожидаемое пробуждение: около 15:00."
+    )
     assert (
         "После пробуждения суммарное бодрствование составит около 5 ч 30 мин."
     ) in answer
@@ -292,7 +304,9 @@ def test_tc_hint_005_stale_button_rereads_state_writes_nothing(
     ))
     second, _ = _press(db_path)
     answer = second.effective_message.replies[0]
-    assert answer.splitlines()[0] == "Сон идёт с 13:30 (уже 45 мин)."
+    assert answer.splitlines()[0] == (
+        "Сон идёт с 13:30 (уже 45 мин). Ожидаемое пробуждение: около 15:00."
+    )
     assert _sleep_count(conn, user_id) == 3  # нажатия ничего не добавили
 
 
@@ -360,8 +374,118 @@ def test_tc_hint_008_text_button_asleep_rereads_state_no_event(
     callback_update, _ = _press(db_path)
 
     answer = text_update.effective_message.replies[0]
-    assert answer.splitlines()[0] == "Сон идёт с 13:30 (уже 45 мин)."
+    assert answer.splitlines()[0] == (
+        "Сон идёт с 13:30 (уже 45 мин). Ожидаемое пробуждение: около 15:00."
+    )
     assert text_update.effective_message.replies == (
         callback_update.effective_message.replies
     )
     assert _sleep_count(conn, user_id) == 3  # событие НЕ создано
+
+
+# ------------------------------------------------- Задача 2.3: §7.6–7.9 дословно
+
+
+def _spec_section(section: str) -> str:
+    """Дословный текст раздела ТЗ §7.x (blockquote после заголовка, AC-6).
+
+    Эталон читается из файла ТЗ, а не копируется в тест: сверка не может
+    «поехать» вместе с texts.py (паттерн TC-SMOKE-002).
+    """
+    lines = _SPEC_FILE.read_text(encoding="utf-8").splitlines()
+    start_idx = next(
+        i for i, line in enumerate(lines) if line.startswith(f"### {section}")
+    )
+    body: list[str] = []
+    for line in lines[start_idx + 1:]:
+        if not line.startswith(">"):
+            if body:
+                break  # blockquote раздела закончился
+            continue  # пустые строки до цитаты
+        body.append(line[1:].lstrip(" "))
+    return "\n".join(body).strip("\n")
+
+
+def test_tc_hint_009_texts_7_6_7_9_match_spec_verbatim():
+    """TC-HINT-009 (задача 2.3, AC-6): дословные тексты §7.6–7.9 —
+    эталонные константы texts.py равны цитатам ФАЙЛА ТЗ, а параметризо-
+    ванные шаблоны рендера с числами примера ТЗ воспроизводят те же
+    цитаты посимвольно (формулировки не «поехали» при параметризации)."""
+    assert texts.HINT_AWAKE == _spec_section("7.6")
+    assert texts.HINT_SLEEPING == _spec_section("7.7")
+    assert texts.LATE_NAP_WARNING == _spec_section("7.8")
+    assert texts.OVERTIRED_WARNING == _spec_section("7.9")
+
+    # Рендер §7.6: числа примера ТЗ → дословная цитата (позиция «ниже»,
+    # дневное окно, без предупреждений).
+    assert texts.hint_awake_text(
+        "4 ч 30 мин",
+        "4 ч 30 мин",
+        texts.hint_position_below_line(
+            "12 ч", "7 ч 30 мин", "12 ч 30 мин", "8 ч"
+        ),
+        texts.hint_nap_window_line("13:20", "14:00"),
+    ) == _spec_section("7.6")
+
+    # Рендер §7.7: факт + прогноз одной строкой, прогноз бодрствования —
+    # второй (числа примера ТЗ).
+    assert texts.hint_sleeping_text(
+        "13:30", "45 мин", "15:00", "10 ч 30 мин"
+    ) == _spec_section("7.7")
+
+    # Рендер §7.8 / §7.9 с числами примера ТЗ.
+    assert texts.late_nap_warning_text(
+        "14:20", "15:50", "15:30"
+    ) == _spec_section("7.8")
+    assert texts.overtired_warning_text("12 ч 40 мин") == _spec_section("7.9")
+
+
+def test_tc_hint_010_late_nap_warning_7_8_verbatim(db_path, conn, monkeypatch):
+    """TC-HINT-010 (FR-35, §7.8 дословно, задача 2.3): поздний подъём 09:00
+    МСК (окно 14:20–15:00, прогноз конца 15:50 позже 15:30) — ответ
+    бодрствующему содержит предупреждение §7.8 ПОСИМВОЛЬНО как в ТЗ, с
+    фактическими цифрами расчёта (не хардкод). Запрос в 12:30 МСК."""
+    monkeypatch.setattr(hint, "datetime", _frozen(FIXED_NOW_UTC))  # 12:30 МСК
+    user_id = _uid(conn)
+    # Ночь 02.11 22:30 МСК → подъём 03.11 09:00 МСК — поздний подъём §3.6.
+    for ts, kind in (
+        ("2026-11-02 19:30:00", "sleep"),
+        ("2026-11-03 06:00:00", "wake"),
+    ):
+        SleepEventsRepo(conn).insert(user_id, kind, ts)
+
+    update, _ = _press(db_path)
+
+    answer = update.effective_message.replies[0]
+    # Дословная формулировка §7.8 с фактическими цифрами расчёта
+    # (шаблон = эталонная цитата ТЗ, TC-HINT-009; числа — из расчёта).
+    assert texts.late_nap_warning_text("14:20", "15:50", "15:30") in answer
+    assert (
+        "⚠️ Если сон начнётся в 14:20, он закончится около 15:50 — "
+        "позже крайнего времени 15:30. Ночной сон может сдвинуться."
+    ) in answer
+    assert "Окно дневного сна: 14:20–15:00." in answer
+
+
+def test_tc_hint_011_overtired_warning_7_9_verbatim(db_path, conn, monkeypatch):
+    """TC-HINT-011 (FR-36, §7.9 дословно, задача 2.3): суммарное
+    бодрствование 13 ч (подъём 08:00 МСК, запрос в 21:00 МСК) превысило
+    верхнюю границу 12,5 ч — ответ содержит предупреждение §7.9
+    ПОСИМВОЛЬНО как в ТЗ с фактической цифрой; окно следующего сна —
+    ночное (запрос после конца дневного окна)."""
+    monkeypatch.setattr(hint, "datetime", _frozen(
+        datetime(2026, 11, 3, 18, 0, tzinfo=timezone.utc)  # 21:00 МСК
+    ))
+    user_id = _uid(conn)
+    _seed_rise(conn, user_id)  # ночь 02.11 22:00 → подъём 03.11 08:00 МСК
+
+    update, _ = _press(db_path)
+
+    answer = update.effective_message.replies[0]
+    # Дословная формулировка §7.9 с фактической цифрой (13 ч > 12,5 ч).
+    assert texts.overtired_warning_text("13 ч") in answer
+    assert (
+        "⚠️ Бодрствование 13 ч — превышена верхняя граница. "
+        "Постарайтесь уложить ребёнка как можно скорее."
+    ) in answer
+    assert "Окно ухода в ночь: около 22:00 (крайнее 22:30)." in answer

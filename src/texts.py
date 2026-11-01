@@ -51,16 +51,201 @@ HINT_SLEEPING = (
     "После пробуждения суммарное бодрствование составит около 10 ч 30 мин."
 )
 
-# §7.8 Предупреждение о позднем дневном сне
+# §7.8 Предупреждение о позднем дневном сне (дословная цитата — одной
+# строкой исходника, чтобы grep находил её в файле)
 LATE_NAP_WARNING = (
-    "⚠️ Если сон начнётся в 14:20, он закончится около 15:50 — позже крайнего времени 15:30. "
-    "Ночной сон может сдвинуться."
+    "⚠️ Если сон начнётся в 14:20, он закончится около 15:50 — позже крайнего времени 15:30. Ночной сон может сдвинуться."
 )
 
-# §7.9 Предупреждение о перегуле
+# §7.9 Предупреждение о перегуле (дословная цитата — одной строкой)
 OVERTIRED_WARNING = (
-    "⚠️ Бодрствование 12 ч 40 мин — превышена верхняя граница. "
-    "Постарайтесь уложить ребёнка как можно скорее."
+    "⚠️ Бодрствование 12 ч 40 мин — превышена верхняя граница. Постарайтесь уложить ребёнка как можно скорее."
+)
+
+
+# --------------------------------------------------------------- Задача 2.3
+# Строки окон §7.2–7.4 в ред. PB-3 (add-recommendations, FR-38, design
+# D20): подтверждения получают строку окна дневного сна, собранную из
+# расчёта (calculation.nap_window — окно ОТ ФАКТИЧЕСКОГО подъёма) и
+# якорей-настроек (design D14: wake_deadline / night_target /
+# night_deadline; лимит растяжения 13:00 — аргументный дефолт
+# nap_window, ключа-настройки нет). Числа в цитатах §7 — примеры ТЗ,
+# НЕ хардкод: в ответах подставляются фактические значения.
+
+def nap_window_line(start_line: str, end_line: str) -> str:
+    """§7.2: строка окна дневного сна — «Окно дневного сна: 13:20–14:00.»."""
+    return f"Окно дневного сна: {start_line}–{end_line}."
+
+
+def nap_window_early_text(
+    stretch_limit_line: str,
+    start_line: str,
+    end_line: str,
+    wake_deadline_line: str,
+    night_target_line: str,
+) -> str:
+    """§7.3 (ранний подъём): совет растянуть бодрствование + окно +
+    якоря «Пробуждение — не позже 15:30, уход в ночь — около 22:00»."""
+    return (
+        f"Сегодня можно растянуть первое бодрствование до {stretch_limit_line}, "
+        f"чтобы не сдвигать режим. Окно дневного сна: {start_line}–{end_line}. "
+        f"Пробуждение — не позже {wake_deadline_line}, "
+        f"уход в ночь — около {night_target_line}."
+    )
+
+
+def nap_window_late_text(
+    start_line: str,
+    end_line: str,
+    wake_deadline_line: str,
+    night_deadline_line: str,
+) -> str:
+    """§7.4 (поздний подъём): окно + граница «разбудить не позже 15:30»,
+    уход в ночь около 22:30."""
+    return (
+        f"Окно дневного сна: {start_line}–{end_line}. "
+        f"Важно разбудить не позже {wake_deadline_line}, "
+        f"чтобы уход в ночь был около {night_deadline_line}."
+    )
+
+
+# ------------------------------------------------- Подсказка «⏰ сейчас»
+# Параметризованные дословные тексты §7.6–7.9 (add-recommendations, задача
+# 2.3): рендер подсказки (handlers/hint.py) подставляет фактические цифры
+# RecommendationService в формулировки ТЗ. Эталонные константы выше
+# (HINT_AWAKE / HINT_SLEEPING / LATE_NAP_WARNING / OVERTIRED_WARNING) —
+# дословные цитаты ТЗ с примерами чисел; соответствие формулировок
+# фиксирует тест TC-HINT-009 (эталон — файл ТЗ, не texts.py).
+
+
+def hint_awake_text(
+    wake_line: str,
+    total_line: str,
+    position_line: str,
+    window_line: str,
+    warning_lines: Iterable[str] = (),
+) -> str:
+    """§7.6: структура ответа бодрствующему (строки §7.6 + предупреждения)."""
+    lines = [
+        f"Бодрствование с последнего пробуждения: {wake_line}. "
+        f"Суммарно за сегодня: {total_line}.",
+        position_line,
+        "",
+        window_line,
+    ]
+    lines.extend(warning_lines)
+    return "\n".join(lines)
+
+
+def hint_position_below_line(
+    lower_line: str,
+    remaining_lower_line: str,
+    upper_line: str,
+    remaining_upper_line: str,
+) -> str:
+    """§7.6, позиция НИЖЕ диапазона: остатки до обеих границ."""
+    return (
+        f"До нижней границы ({lower_line}) осталось: {remaining_lower_line}. "
+        f"До верхней границы ({upper_line}) осталось: {remaining_upper_line}."
+    )
+
+
+def hint_position_in_line(
+    lower_line: str,
+    upper_line: str,
+    remaining_upper_line: str,
+) -> str:
+    """Позиция В диапазоне — служебная формулировка вне ТЗ §7 (в §7.6
+    показан только случай «ниже»): граница ещё не достигнута."""
+    return (
+        f"Бодрствование в границах {lower_line}–{upper_line}. "
+        f"До верхней границы осталось: {remaining_upper_line}."
+    )
+
+
+def hint_position_above_line(upper_line: str) -> str:
+    """Позиция ВЫШЕ диапазона — служебная формулировка вне ТЗ §7."""
+    return f"Суммарное бодрствование превысило верхнюю границу ({upper_line})."
+
+
+def hint_nap_window_line(start_line: str, end_line: str) -> str:
+    """Строка дневного окна в подсказке — та же формулировка §7.2."""
+    return nap_window_line(start_line, end_line)
+
+
+def hint_night_window_line(recommended_line: str, deadline_line: str) -> str:
+    """Ночное окно вечером — служебная формулировка вне ТЗ §7 (§7.6
+    показывает дневной случай; конкретная рекомендация ОВ-4.2)."""
+    return f"Окно ухода в ночь: около {recommended_line} (крайнее {deadline_line})."
+
+
+#: Ранний подъём в подсказке (§3.6): окно уже до лимита — совет тянуть
+#: бодрствование до конца окна (служебная формулировка вне ТЗ §7).
+HINT_STRETCH_SUFFIX = " Сегодня можно растянуть до конца окна."
+
+
+def hint_sleeping_text(
+    sleep_start_line: str,
+    duration_line: str,
+    forecast_wake_line: str | None = None,
+    forecast_total_wake_line: str | None = None,
+    over_target_line: str | None = None,
+) -> str:
+    """§7.7: сон идёт с … (уже …). Ожидаемое пробуждение: около … —
+    первой строкой; прогноз бодрствования после — второй. Прогнозы и
+    мягкая отметка FR-37 — по наличию (ночной сон — только факт)."""
+    first = f"Сон идёт с {sleep_start_line} (уже {duration_line})."
+    if forecast_wake_line is not None:
+        first += f" Ожидаемое пробуждение: около {forecast_wake_line}."
+    lines = [first]
+    if forecast_total_wake_line is not None:
+        lines.append(
+            "После пробуждения суммарное бодрствование составит около "
+            f"{forecast_total_wake_line}."
+        )
+    if over_target_line is not None:
+        lines.append(over_target_line)
+    return "\n".join(lines)
+
+
+def hint_over_target_line(duration_line: str, target_line: str) -> str:
+    """Мягкая отметка FR-37 (дневной сон дольше цели) — вне ТЗ §7;
+    push «пора будить» отклонён (ОВ-4.1)."""
+    return f"Сон идёт дольше обычного: {duration_line} при обычной цели {target_line}."
+
+
+def late_nap_warning_text(
+    nap_start_line: str,
+    forecast_end_line: str,
+    deadline_line: str,
+) -> str:
+    """§7.8: предупреждение о позднем дневном сне с фактическими цифрами."""
+    return (
+        f"⚠️ Если сон начнётся в {nap_start_line}, он закончится около "
+        f"{forecast_end_line} — позже крайнего времени {deadline_line}. "
+        "Ночной сон может сдвинуться."
+    )
+
+
+def overtired_warning_text(total_wake_line: str) -> str:
+    """§7.9: предупреждение о перегуле с фактической цифрой."""
+    return (
+        f"⚠️ Бодрствование {total_wake_line} — превышена верхняя граница. "
+        "Постарайтесь уложить ребёнка как можно скорее."
+    )
+
+
+def anchor_conflict_warning_line(anchors: str, accepted: str) -> str:
+    """Конфликт якорей (D18) — служебная формулировка вне ТЗ §7."""
+    return f"⚠️ Якоря в противоречии: {anchors}. {accepted}."
+
+
+#: Неполные данные (FR-34, §4.6): просьба отметить события; «0 ч» и
+#: окна от ненастоящего подъёма не выводятся. Служебный текст вне ТЗ §7.
+HINT_INCOMPLETE = (
+    "Пока нет факта подъёма за сегодня — данных для подсказки мало.\n"
+    "Отметьте «☀️ Проснулся» или введите время задним числом, "
+    "и я посчитаю окна."
 )
 
 # §7.10 Ввод задним числом — выбор времени
@@ -185,8 +370,12 @@ def format_duration(total: timedelta) -> str:
     return f"{hours} ч {mins} мин"
 
 
-def backfill_success_text(local_hhmm: str, summary_lines: Iterable[str]) -> str:
-    """§7.14 без окон (FR-19 в ред. волны 6, PB-3, задача 6.1).
+def backfill_success_text(
+    local_hhmm: str,
+    summary_lines: Iterable[str],
+    window_line: str | None = None,
+) -> str:
+    """§7.14 (FR-19 в ред. волны 6, PB-3 + FR-38, задача 2.3 / D20).
 
     Адаптация дословного BACKFILL_SUCCESS: подтверждающая строка с
     временем ввода + обновлённая сводка за день как список ФАКТИЧЕСКИХ
@@ -194,15 +383,22 @@ def backfill_success_text(local_hhmm: str, summary_lines: Iterable[str]) -> str:
     Дневной сон / Отбой / Ночной сон / Бодрствование общее) — вместо
     абстрактных суммарных сон/бодрствование старого формата. Суммарный
     сон за день НЕ вычисляется и НЕ показывается (может превышать 24 ч
-    из-за ночной страницы — design D8). Строки окон НЕ выводятся
-    (окна — Пакет 2). Строки сводки строит calculation.day_facts_lines
-    (единая точка, без дублей по хендлерам).
+    из-за ночной страницы — design D8). Строки сводки строит
+    calculation.day_facts_lines (единая точка, без дублей по хендлерам).
+
+    Строка окна дневного сна (задача 2.3, design D20) добавляется К
+    сводке после её строк — подавление окон волны 6 снято; сама сводка
+    PB-3 НЕ меняется (побайтно как в волне 6). Окна нет (факта «Подъем»
+    страницы нет) — строка не добавляется.
     """
+    lines = list(summary_lines)
+    if window_line is not None:
+        lines.append(window_line)
     return (
         f"✅ Событие записано на {local_hhmm}.\n"
         "\n"
         "Обновлённая сводка за день:\n"
-        + "\n".join(summary_lines)
+        + "\n".join(lines)
     )
 
 # §7.15 Ввод задним числом — слишком давно

@@ -34,7 +34,9 @@
 # фактических событий дня (формат продакта): сборка — events.day_summary_lines
 # (ЕДИНАЯ точка для всех трёх подтверждений, без дублей форматирования);
 # суммарный сон за день НЕ вычисляется (может превышать 24 ч из-за ночной
-# страницы — design D8); строки окон НЕ выводятся (окна — Пакет 2).
+# страницы — design D8). Задача 2.3 (FR-38, design D20): подавление окон
+# волны 6 снято — строка окна дневного сна добавляется К сводке
+# (events.nap_window_text — окно страницы ввода от фактического подъёма).
 #
 # FR-15: выбор «Ввести время вручную» запрашивает время текстом §7.11.
 #
@@ -59,6 +61,7 @@ from src.handlers.events import (
     PENDING_KIND_KEY,
     WAIT_EVENT_TIME_KEY,
     day_summary_lines,
+    nap_window_text,
 )
 from src.services.backfill_parser import FUTURE, TOO_OLD, parse_time_input, resolve_tz
 from src.services.event import (
@@ -149,19 +152,25 @@ def _local_hhmm(utc_moment: str | datetime, tz_name: str | None) -> str:
 def _backfill_success_text(
     conn: sqlite3.Connection, user: dict, when_utc: str
 ) -> str:
-    """Ответ §7.14 (FR-19 в ред. волны 6, PB-3, задача 6.1): подтверждение
-    + сводка событий дня.
+    """Ответ §7.14 (FR-19 в ред. волны 6, PB-3 + FR-38, задача 2.3/D20):
+    подтверждение + строка окна + сводка событий дня.
 
     Сводка — фактические события дня СТРАНИЦЫ вводимого времени (design
     D6/D8), не сегодняшней, в формате продакта (Подъем / Заснул /
     Проснулся / Дневной сон / Отбой / Ночной сон + Бодрствование общее):
     сборка — events.day_summary_lines (единая точка всех трёх
     подтверждений); суммарный сон за день НЕ вычисляется (может
-    превышать 24 ч из-за ночной страницы — D8); строки окон не выводятся
-    (Пакет 2, решение ОВ-ПО-2).
+    превышать 24 ч из-за ночной страницы — D8). Подавление окон волны 6
+    СНЯТО (задача 2.3): строка окна дневного сна добавляется К сводке
+    (events.nap_window_text — тот же calculation.nap_window от подъёма
+    страницы ввода; None — факта «Подъем» нет, строка не добавляется);
+    сама сводка PB-3 НЕ меняется.
     """
     lines = day_summary_lines(conn, user, when_utc)
-    return texts.backfill_success_text(_local_hhmm(when_utc, user["timezone"]), lines)
+    window_line = nap_window_text(conn, user, when_utc)
+    return texts.backfill_success_text(
+        _local_hhmm(when_utc, user["timezone"]), lines, window_line
+    )
 
 
 async def backfill_time_message(
@@ -354,8 +363,9 @@ async def conflict_callback(
                     local=_local_hhmm(pending["when_utc"], user["timezone"]),
                 )
             )
-            # Задача 4.5 (FR-19, ОВ-ПО-2): «Изменить» — тоже успешный
-            # ввод задним числом → §7.14 со сводкой за день (без окон).
+            # Задача 4.5 (FR-19, ОВ-ПО-2) + 2.3 (FR-38/D20): «Изменить» —
+            # тоже успешный ввод задним числом → §7.14 со сводкой за день
+            # и строкой окна.
             await update.effective_message.reply_text(
                 _backfill_success_text(conn, user, pending["when_utc"])
             )

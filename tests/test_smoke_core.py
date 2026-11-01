@@ -332,11 +332,13 @@ class TestSmokeCore:
         assert answer_714.startswith("✅ Событие записано на 22:30.")
         assert "Обновлённая сводка за день:" in answer_714
         # Формат продакта (PB-3): события дня + «Бодрствование общее»;
-        # абстрактных сумм «Сон: …»/«Бодрствование: …» и окон нет.
+        # абстрактных сумм «Сон: …»/«Бодрствование: …» нет. Строка окна
+        # (FR-38, задача 2.3) не добавляется: на странице «вчера» НЕТ
+        # факта «Подъем» (сон с 22:30 незакрыт) — окно не строится.
         assert "Бодрствование общее: " in answer_714
         assert "Сон:" not in answer_714
         assert "Бодрствование:" not in answer_714
-        assert "Окно" not in answer_714  # окна — Пакет 2 (решение ОВ-ПО-2)
+        assert "Окно" not in answer_714
         # Диалог завершён — фазы сняты (design D10)
         assert events.WAIT_EVENT_TIME_KEY not in user_data
         assert events.PENDING_KIND_KEY not in user_data
@@ -380,8 +382,8 @@ class TestSmokeCore:
         assert texts.BACKFILL_ASK_TIME == _spec_section("7.11")
         # §7.12 — ошибка формата
         assert texts.BACKFILL_BAD_FORMAT == _spec_section("7.12")
-        # §7.14 — эталонная цитата (фактический ответ — backfill_success_text
-        # без строки окна, решение ОВ-ПО-2)
+        # §7.14 — эталонная цитата (фактический ответ — backfill_success_text:
+        # строки сводки PB-3 + строка окна из расчёта, FR-38/задача 2.3)
         assert texts.BACKFILL_SUCCESS == _spec_section("7.14")
         # §7.15 — слишком давно
         assert texts.BACKFILL_TOO_OLD == _spec_section("7.15")
@@ -391,6 +393,12 @@ class TestSmokeCore:
         assert "Сон идёт. Крайнее пробуждение: " in fell_template
         # §7.2 — подтверждающая строка о пробуждении
         assert _spec_section("7.2").startswith("✅ Пробуждение записано в ")
+        # §7.6–7.9 — подсказки, ДОСЛОВНО (задача 2.3, AC-6):
+        # эталонные константы texts.py == цитатам файла ТЗ.
+        assert texts.HINT_AWAKE == _spec_section("7.6")
+        assert texts.HINT_SLEEPING == _spec_section("7.7")
+        assert texts.LATE_NAP_WARNING == _spec_section("7.8")
+        assert texts.OVERTIRED_WARNING == _spec_section("7.9")
         # Кнопки §7.10 дословно
         assert texts.BTN_TIME_NOW == "🕐 Сейчас"
         assert texts.BTN_TIME_MANUAL == "⏪ Ввести время вручную"

@@ -60,68 +60,16 @@ def _notify_scheduler() -> None:
     scheduler.notify_events_changed()
 
 
-def create_event(
-    conn: sqlite3.Connection,
-    user_id: int,
-    kind: str,
-    when_utc: str,
-    *,
-    is_backfilled: bool = False,
-) -> dict:
-    """Создать событие sleep/wake с сырыми полями (FR-7, FR-8, design D6).
-
-    when_utc — момент события строкой UTC «YYYY-MM-DD HH:MM:SS» (design D4).
-    is_backfilled=True — ввод задним числом (FR-16, задача 4.5); кнопки
-    «сейчас» пишут дефолт False. Проверки перед записью (design D5):
-      - kind допустим (sleep/wake);
-      - состояние ребёнка соответствует (перечитано из БД);
-      - нет незакрытого такого же события (последняя запись не того же вида).
-    Возвращает созданную запись (dict из SleepEventsRepo-полей).
-    ValueError — любая проверка не пройдена: событие НЕ создаётся.
-    """
-    if kind not in VALID_KINDS:
-        raise ValueError(f"недопустимый вид события: {kind!r}")
-
-    # Состояние всегда перечитывается из БД (design D5, без кэша).
-    current_state = state.get_state(conn, user_id)
-    expected = state.STATE_AWAKE if kind == KIND_SLEEP else state.STATE_ASLEEP
-    if current_state != expected:
-        raise ValueError(
-            f"состояние {current_state!r} не соответствует кнопке {kind!r}"
-        )
-
-    # Незакрытое событие того же вида (последнее — по created_at, затем id,
-    # design D12): повторное sleep при спящем / wake при бодрствующем.
-    last = SleepEventsRepo(conn).last(user_id)
-    if last is not None and last["event_type"] == kind:
-        raise ValueError(f"незакрытое событие {kind!r} уже существует")
-
-    event_id = SleepEventsRepo(conn).insert(
-        user_id, kind, when_utc, is_backfilled=is_backfilled
-    )
-    _notify_scheduler()
-    return {
-        "id": event_id,
-        "user_id": user_id,
-        "event_type": kind,
-        "timestamp": when_utc,
-        "is_backfilled": is_backfilled,
-        "sleep_type": None,  # design D6: разметка — расчёт при чтении
-        "is_merged": None,   # design D9: склейка — расчёт при чтении
-    }
-
-
-# ------------------------- Атомарная ПАРА задним числом (3.1, FR-51)
-
-def _ensure_pair_step(
+def _ensure_event_step(
     conn: sqlite3.Connection, user_id: int, kind: str
 ) -> None:
-    """D5-проверки ОДНОГО шага пары перед stage-вставкой (3.1-fix).
+    """D5-проверки ОДНОГО события перед записью (FR-7, FR-8; 4.2: note 3
+    review-002-3.1 — ЕДИНЫЙ хелпер create_event и пары, дубля нет).
 
-    Те же гарантии, что у create_event (FR-7, FR-8): вид допустим;
-    состояние соответствует кнопке (перечитано из БД); нет незакрытого
-    такого же события. БЕЗ записи — вставку и commit делает
-    create_event_pair. Проверка шага 2 (wake) выполняется ПОСЛЕ
+    Вид допустим; состояние соответствует кнопке (перечитано из БД,
+    design D5, без кэша); нет незакрытого такого же события (последнее —
+    по created_at, затем id, design D12). БЕЗ записи — вставку делает
+    вызывающий. Проверка шага 2 пары (wake) выполняется ПОСЛЕ
     stage-вставки засыпания и видит её: тот же conn, та же транзакция
     (повторяет последовательность двух create_event).
     """
@@ -141,6 +89,43 @@ def _ensure_pair_step(
     last = SleepEventsRepo(conn).last(user_id)
     if last is not None and last["event_type"] == kind:
         raise ValueError(f"незакрытое событие {kind!r} уже существует")
+
+
+def create_event(
+    conn: sqlite3.Connection,
+    user_id: int,
+    kind: str,
+    when_utc: str,
+    *,
+    is_backfilled: bool = False,
+) -> dict:
+    """Создать событие sleep/wake с сырыми полями (FR-7, FR-8, design D6).
+
+    when_utc — момент события строкой UTC «YYYY-MM-DD HH:MM:SS» (design D4).
+    is_backfilled=True — ввод задним числом (FR-16, задача 4.5); кнопки
+    «сейчас» пишут дефолт False. Проверки перед записью (design D5) —
+    единый хелпер _ensure_event_step (FR-7/FR-8). Возвращает созданную
+    запись (dict из SleepEventsRepo-полей).
+    ValueError — любая проверка не пройдена: событие НЕ создаётся.
+    """
+    _ensure_event_step(conn, user_id, kind)
+
+    event_id = SleepEventsRepo(conn).insert(
+        user_id, kind, when_utc, is_backfilled=is_backfilled
+    )
+    _notify_scheduler()
+    return {
+        "id": event_id,
+        "user_id": user_id,
+        "event_type": kind,
+        "timestamp": when_utc,
+        "is_backfilled": is_backfilled,
+        "sleep_type": None,  # design D6: разметка — расчёт при чтении
+        "is_merged": None,   # design D9: склейка — расчёт при чтении
+    }
+
+
+# ------------------------- Атомарная ПАРА задним числом (3.1, FR-51)
 
 
 def create_event_pair(
@@ -170,11 +155,11 @@ def create_event_pair(
     созданные записи (dict из SleepEventsRepo-полей).
     """
     repo = SleepEventsRepo(conn)
-    _ensure_pair_step(conn, user_id, KIND_SLEEP)
+    _ensure_event_step(conn, user_id, KIND_SLEEP)
     sleep_id = repo.stage_insert(
         user_id, KIND_SLEEP, sleep_utc, is_backfilled=True
     )
-    _ensure_pair_step(conn, user_id, KIND_WAKE)
+    _ensure_event_step(conn, user_id, KIND_WAKE)
     wake_id = repo.stage_insert(
         user_id, KIND_WAKE, wake_utc, is_backfilled=True
     )

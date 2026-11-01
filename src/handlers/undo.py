@@ -37,7 +37,7 @@ from telegram.ext import ContextTypes
 
 from src import texts
 from src.handlers import common
-from src.handlers.events import _local_hhmm, _settings_day_start, day_summary_lines
+from src.handlers.events import day_summary_lines, local_hhmm, settings_day_start
 from src.repositories.sleep_events import SleepEventsRepo
 from src.services import access
 from src.services import scheduler as reminder_scheduler
@@ -87,11 +87,11 @@ def undo_done_text(
     label = texts.KIND_LABELS.get(
         event["event_type"], event["event_type"]
     )
-    local_hhmm = _local_hhmm(event["timestamp"], user["timezone"])
-    return texts.undo_done_text(label, local_hhmm, _leftover_state(conn, user))
+    removed_line = local_hhmm(event["timestamp"], user["timezone"])
+    return texts.undo_done_text(label, removed_line, _leftover_state(conn, user))
 
 
-# _local_hhmm и _settings_day_start — единые хелперы handlers.events
+# local_hhmm и settings_day_start — единые хелперы handlers.events
 # (техдолг пакета 2, п. 2.1: дубли undo/events сведены; семантика та же —
 # строка БД или aware datetime → «ЧЧ:ММ» локально, day_start с фолбэком D8).
 
@@ -107,7 +107,7 @@ def _leftover_state(conn: sqlite3.Connection, user: dict) -> str:
     user_id = user["id"]
     tz_name = user["timezone"]
     settings = SettingsService(conn)
-    day_start = _settings_day_start(str(settings.get(user_id, "day_start")))
+    day_start = settings_day_start(str(settings.get(user_id, "day_start")))
 
     ref_utc = datetime.now(timezone.utc)
     # Полный локальный момент «сейчас» — как events._local_naive:

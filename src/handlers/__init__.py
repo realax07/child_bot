@@ -204,7 +204,10 @@ async def _discard_delete_confirm_update(update, context) -> None:
     message = update.effective_message
     if message is not None:
         text = message.text or ""
-        if text.startswith("/delete_all"):
+        # 4.2 (minor-2 review-001-3.3): сравнение ПЕРВОГО токена, а не
+        # startswith — «/delete_allxyz» и прочий мусор с префиксом гасят
+        # фазу, как любая чужая команда (CommandHandler на них не срабатывает).
+        if (text.split() or [""])[0] == "/delete_all":
             return  # собственная команда — фазу только что поставила группа 0
     _pop_confirm_phase(context)
 

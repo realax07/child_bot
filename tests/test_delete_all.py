@@ -26,6 +26,7 @@ FSM-фаз в обе стороны; наблюдателю — отказ (D13)
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -462,3 +463,58 @@ class _FakeBot:
 
     async def send_message(self, chat_id, text, **kwargs) -> None:
         self.sent.append((chat_id, text))
+
+
+class _FailingConn:
+    """Прокси-соединение: 3-й DELETE (settings_history) падает (инъекция
+    сбоя между DELETE — образец пробы ревьюера review-001-3.3)."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        if "settings_history" in sql:
+            raise sqlite3.OperationalError("injected failure (test)")
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_tc_helpdel_016_delete_all_failure_explicit_rollback(db_path, conn):
+    """TC-HELPDEL-016 (4.2, minor-1 review-001-3.3): сбой между DELETE —
+    ЯВНЫЙ rollback в UsersRepo.delete_all_data: атомарность не зависит
+    от дисциплины вызывающего — на ТОМ ЖЕ соединении после исключения
+    все 4 сущности целы (не ждём close() и неявный откат)."""
+    _run_start(db_path)
+    user_id = UsersRepo(conn).get_or_create(1001)["id"]
+    _seed_diary(conn, user_id)
+    before = _counts(conn, user_id)
+
+    repo = UsersRepo(_FailingConn(conn))
+    with pytest.raises(sqlite3.OperationalError):
+        repo.delete_all_data(user_id)
+
+    # явный rollback: частичные изменения НЕ видны на том же соединении
+    assert _counts(conn, user_id) == before
+
+
+def test_tc_helpdel_017_guard_matches_first_token_only(db_path, conn):
+    """TC-HELPDEL-017 (4.2, minor-2 review-001-3.3): guard сравнивает
+    ПЕРВЫЙ токен: мусорная команда «/delete_allxyz» ГАСИТ фазу
+    подтверждения (CommandHandler на неё не срабатывает), а ввод с
+    первым токеном ровно «/delete_all» — нет."""
+    _, context = _run_delete_command(db_path)
+    assert context.user_data[CONFIRM_DELETE_ALL_KEY] is True
+
+    _other_input(
+        _TextUpdate(1001, "/delete_allxyz"), context.user_data, db_path
+    )
+    assert CONFIRM_DELETE_ALL_KEY not in context.user_data
+
+    # первый токен ровно /delete_all — собственная команда, фаза цела
+    _, context = _run_delete_command(db_path)
+    _other_input(
+        _TextUpdate(1001, "/delete_all"), context.user_data, db_path
+    )
+    assert context.user_data[CONFIRM_DELETE_ALL_KEY] is True

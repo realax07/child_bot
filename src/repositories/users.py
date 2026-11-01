@@ -114,18 +114,28 @@ class UsersRepo:
         DELETE из users.py, без метода в SettingsRepo).
         True — строка users удалена (пользователь существовал);
         False — пользователя не было, данных нет изменений.
+
+        4.2 (minor-1 review-001-3.3): сбой между DELETE — ЯВНЫЙ rollback:
+        атомарность не зависит от дисциплины вызывающего (неявный откат
+        лишь при close() на том же соединении; любой последующий commit
+        или работа на соединении закоммитила бы частичное удаление).
         """
-        self._conn.execute(
-            "DELETE FROM sleep_events WHERE user_id = ?", (user_id,)
-        )
-        self._conn.execute(
-            "DELETE FROM settings WHERE user_id = ?", (user_id,)
-        )
-        self._conn.execute(
-            "DELETE FROM settings_history WHERE user_id = ?", (user_id,)
-        )
-        cur = self._conn.execute(
-            "DELETE FROM users WHERE id = ?", (user_id,)
-        )
-        self._conn.commit()
+        cur = None
+        try:
+            self._conn.execute(
+                "DELETE FROM sleep_events WHERE user_id = ?", (user_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM settings WHERE user_id = ?", (user_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM settings_history WHERE user_id = ?", (user_id,)
+            )
+            cur = self._conn.execute(
+                "DELETE FROM users WHERE id = ?", (user_id,)
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
         return cur.rowcount > 0

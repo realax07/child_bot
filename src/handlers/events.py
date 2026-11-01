@@ -160,7 +160,7 @@ def _local_naive(utc_moment: str | datetime, tz_name: str | None) -> datetime:
     return utc_moment.astimezone(resolve_tz(tz_name or "")).replace(tzinfo=None)
 
 
-def _settings_day_start(raw: str) -> time:
+def settings_day_start(raw: str) -> time:
     """«ЧЧ:ММ» настройки day_start → time; фолбэк — дефолт расчётов (D8)."""
     try:
         hh, mm = raw.split(":")
@@ -183,7 +183,7 @@ def day_summary_lines(
     user_id = user["id"]
     tz_name = user["timezone"]
     settings = SettingsService(conn)
-    day_start = _settings_day_start(str(settings.get(user_id, "day_start")))
+    day_start = settings_day_start(str(settings.get(user_id, "day_start")))
     threshold = int(settings.get(user_id, "merge_threshold"))
 
     raw_events = [
@@ -221,7 +221,7 @@ def _woke_after_day_sleep(
         build_sleep_intervals(
             raw_events,
             now_local=ref_local,
-            day_start=_settings_day_start(str(settings.get("day_start"))),
+            day_start=settings_day_start(str(settings.get("day_start"))),
         ),
         int(settings.get("merge_threshold", 20)),
     )
@@ -344,7 +344,7 @@ def time_choose_markup() -> InlineKeyboardMarkup:
     )
 
 
-def _local_hhmm(
+def local_hhmm(
     utc_moment: str | datetime, tz_name: str | None
 ) -> str:
     """UTC-момент (строка БД «YYYY-MM-DD HH:MM:SS» или aware datetime) →
@@ -642,7 +642,7 @@ async def time_choose_callback(
         # пользователь всё равно не увидит «часики».
         await query.answer()
         await common.redraw_menu(update, conn, user["id"])
-        local_hhmm = _local_hhmm(now_utc, user["timezone"])
+        now_line = local_hhmm(now_utc, user["timezone"])
         # Сводка — ЕДИНАЯ точка сборки (PB-3): события и настройки читаются
         # ПОСЛЕ записи события — факт уже в списке (расчётный момент — now).
         summary_lines = day_summary_lines(conn, user, now_utc)
@@ -652,7 +652,7 @@ async def time_choose_callback(
             # расчёт окна здесь и НЕ нужен (техдолг пакета 2, п. 2.3:
             # лишний вызов next_sleep_line в §7.5-ветке снят — окно
             # строится только для wake-ветки ниже).
-            answer = fell_asleep_text(local_hhmm, summary_lines)
+            answer = fell_asleep_text(now_line, summary_lines)
         else:
             # FR-8: подтверждающая строка + окно + сводка PB-3 без изменений.
             # Строка следующего сна — по типу пробуждения (BUG-005,
@@ -660,7 +660,7 @@ async def time_choose_callback(
             # сна → конкретное время ухода; None — факта «Подъем» нет
             # (окна/рекомендации от неполных данных не строим).
             window_line = next_sleep_line(conn, user, now_utc)
-            answer = woke_up_text(local_hhmm, summary_lines, window_line)
+            answer = woke_up_text(now_line, summary_lines, window_line)
         if update.effective_message is not None:
             await update.effective_message.reply_text(answer)
     finally:

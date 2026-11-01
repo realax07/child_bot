@@ -67,7 +67,7 @@ def _history_count(db: sqlite3.Connection, user_id: int) -> int:
 # ------------------------------------------------- ТЗ §9.4: схема таблицы
 
 
-def test_tc_sett_001_init_db_creates_settings_history(db):
+def test_tc_sett_004_init_db_creates_settings_history(db):
     """TC-SETT-004: settings_history создаётся init_db по ТЗ §9.4.
 
     Трассировка: Requirement «Логирование изменений в settings_history»;
@@ -96,7 +96,7 @@ def test_tc_sett_001_init_db_creates_settings_history(db):
         )
 
 
-def test_tc_sett_002_init_db_idempotent_keeps_history(tmp_path):
+def test_tc_sett_005_init_db_idempotent_keeps_history(tmp_path):
     """TC-SETT-005: повторный init_db идемпотентен — схема и данные целы.
 
     Трассировка: tasks.md 1.1 «идемпотентно, данных не лифтуем».
@@ -125,7 +125,7 @@ def test_tc_sett_002_init_db_idempotent_keeps_history(tmp_path):
 # --------------------------------------------------- FR-46: запись истории
 
 
-def test_tc_sett_003_wake_deadline_update_writes_history(db, user_id, fixed_now):
+def test_tc_sett_001_wake_deadline_update_writes_history(db, user_id, fixed_now):
     """TC-SETT-001: wake_deadline 15:30 → 15:40 — строка old=15:30/new=15:40.
 
     Трассировка: Scenario «Запись при смены» (specs/settings-ui); FR-46.
@@ -145,7 +145,7 @@ def test_tc_sett_003_wake_deadline_update_writes_history(db, user_id, fixed_now)
     assert row["changed_at"] == FIXED_NOW
 
 
-def test_tc_sett_004_duration_formats_accepted(db, user_id):
+def test_tc_sett_002_duration_formats_accepted(db, user_id):
     """TC-SETT-002: форматы длительности «5:20»/«5ч20м»/минуты → минуты.
 
     Трассировка: FR-44; design D21 (длительность три формы).
@@ -165,7 +165,7 @@ def test_tc_sett_004_duration_formats_accepted(db, user_id):
     assert raw == "320"
 
 
-def test_tc_sett_005_history_newest_first_and_isolated(db, user_id, fixed_now):
+def test_tc_sett_006_history_newest_first_and_isolated(db, user_id, fixed_now):
     """TC-SETT-006: история — новые первыми; чужой user_id не видит.
 
     Трассировка: ТЗ §5.1; Scenario «Изоляция пользователей» (settings-ui).
@@ -191,7 +191,7 @@ def test_tc_sett_005_history_newest_first_and_isolated(db, user_id, fixed_now):
 # ------------------------------------------------- FR-44/45: отказы без записи
 
 
-def test_tc_sett_006_unparseable_input_rejected_without_writes(db, user_id):
+def test_tc_sett_003_unparseable_input_rejected_without_writes(db, user_id):
     """TC-SETT-003: «полтора часа» → отказ, настройки и история не тронуты.
 
     Трассировка: Scenario «Неразбираемый ввод» (settings-ui); FR-44/46.
@@ -344,3 +344,33 @@ def test_tc_sett_014_all_default_keys_have_format(db, user_id):
         assert old == DEFAULT_KEYS[key]
         assert svc.get(user_id, key) == new
     assert _history_count(db, user_id) == len(DEFAULT_KEYS)
+
+
+def test_tc_sett_031_hm_form_minutes_capped_and_m_suffix_required(db, user_id):
+    """TC-SETT-031: грамматика «ЧчММ» едина (4.2, minor-1 review-001-1.1):
+    «5ч»→360; «5ч20м»→320; «5ч75м» — минуты > 59 → отказ (как «5:75»);
+    «5ч20» без суффикса «м» — двусмысленно → отказ; настройка и история
+    не пишутся при отказе.
+    """
+    svc = SettingsService(db)
+    assert svc.update(user_id, "sleep_min_before_nap", "5ч")[1] == 300
+    assert svc.update(user_id, "sleep_min_before_nap", "5ч20м")[1] == 320
+    for bad in ("5ч75м", "5ч20"):
+        with pytest.raises(SettingsValueError):
+            svc.update(user_id, "sleep_min_before_nap", bad)
+    assert svc.get(user_id, "sleep_min_before_nap") == 320  # отказ не писал
+    assert _history_count(db, user_id) == 2  # только два успешных
+
+
+def test_tc_sett_032_minutes_form_three_digits_accepted(db, user_id):
+    """TC-SETT-032: «Nм» — до 3 цифр (4.2, санкция ПМ): «120м»→120
+    (= 2 ч; прежний кап 2 цифр отбрасывал легитимное значение);
+    «999м»→999; «1000м» (4 цифры) → отказ без записи.
+    """
+    svc = SettingsService(db)
+    assert svc.update(user_id, "target_nap_duration", "120м")[1] == 120
+    assert svc.update(user_id, "merge_threshold", "999м")[1] == 999
+    with pytest.raises(SettingsValueError):
+        svc.update(user_id, "remind_before", "1000м")
+    assert svc.get(user_id, "remind_before") == DEFAULT_KEYS["remind_before"]
+    assert _history_count(db, user_id) == 2  # только два успешных

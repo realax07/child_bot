@@ -486,10 +486,21 @@ class TestSmokeSettingsHistory:
         assert events_count(user["id"]) == 26  # история ничего не пишет
 
         # 4. Базовая подсказка ДО правки: окно от подъёма 08:00 и
-        #    дефолтной минимальной границы 5 ч 20 мин → 13:20–14:00.
+        #    дефолтной минимальной границы 5 ч 20 мин → 13:20–14:00
+        #    (4.2, minor-1 review-001-4.1: ПОЛНОЕ равенство строк —
+        #    как в симметричном hint_after, не substring).
         hint_before, _ = self._press_panel(db_path, BTN_HINT, user_data)
         hint_before_text = hint_before.effective_message.replies[0]
-        assert "Окно дневного сна: 13:20–14:00." in hint_before_text
+        assert hint_before_text == "\n".join(
+            [
+                "Бодрствование с последнего пробуждения: 4 ч. "
+                "Суммарно за сегодня: 4 ч.",
+                "До нижней границы (12 ч) осталось: 8 ч. "
+                "До верхней границы (12 ч 30 мин) осталось: 8 ч 30 мин.",
+                "",
+                "Окно дневного сна: 13:20–14:00.",
+            ]
+        )
 
         # 5. «⚙️ Настройки» → экран §7.16 (FR-42, D21): КАЖДАЯ строка
         #    цитаты ТЗ — в экране дословно (эталон из файла ТЗ, AC-6);
@@ -665,6 +676,9 @@ class TestSmokeSettingsHistory:
         sleep2_update, _ = self._press_panel(db_path, BTN_SLEEP, user_data)
         assert sleep2_update.effective_message.replies == [texts.BACKFILL_CHOOSE_TIME]
         now_update, _ = self._press_time(db_path, CALLBACK_TIME_NOW, user_data)
+        # 4.2 (minor-2 review-001-4.1): ровно ОДИН ответ — лишний побочный
+        # ответ хендлера остался бы незамеченным.
+        assert len(now_update.effective_message.replies) == 1
         assert now_update.effective_message.replies[0].splitlines() == [
             "✅ Засыпание записано в 12:00.",
             "Сон идёт.",

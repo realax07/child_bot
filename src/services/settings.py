@@ -92,8 +92,14 @@ _PAIR_MIN_SIDE = frozenset({"sleep_min_before_nap", "wake_total_min"})
 
 _RE_HHMM = re.compile(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$")
 _RE_HOURS = re.compile(r"^\s*\d+(?:\.\d+)?\s*$")
-_RE_HM = re.compile(r"^\s*(\d+)\s*ч\s*(?:(\d{1,2})\s*м?)?\s*$")
-_RE_M = re.compile(r"^\s*(\d{1,2})\s*м\s*$")
+# Грамматика «ЧчММ» (4.2, minor-1 review-001-1.1 — единые правила):
+#   «5ч» — часы без минут; «5ч20м» — минуты ОБЯЗАТЕЛЬНО с суффиксом «м»
+#   (голое «5ч20» двусмысленно — отклоняется); минутная часть ≤ 59
+#   проверяется в _parse_duration_minutes (как в форме «5:20»).
+_RE_HM = re.compile(r"^\s*(\d+)\s*ч(?:\s*(\d{1,2})\s*м)?\s*$")
+# «Nм» — до 3 цифр: «120м» = 2 ч (sanctioned 4.2: кап 2 цифры отбрасывал
+# легитимные значения вроде target_nap_duration=120; 4+ цифр — опечатка).
+_RE_M = re.compile(r"^\s*(\d{1,3})\s*м\s*$")
 _RE_INT = re.compile(r"^\s*\d+\s*$")
 
 
@@ -113,7 +119,13 @@ def _parse_hhmm(text: str) -> str:
 
 
 def _parse_duration_minutes(text: str) -> int:
-    """Длительность «5:20»/«5ч20м»/«20м»/минуты -> минуты; иначе ошибка."""
+    """Длительность «5:20»/«5ч20м»/«5ч»/«20м»/минуты -> минуты; иначе ошибка.
+
+    Единые правила (4.2, minor-1 review-001-1.1): минутная часть ≤ 59
+    в ЛЮБОЙ составной форме («5:75» и «5ч75м» отклоняются одинаково);
+    минуты в «ЧчММ» — только с суффиксом «м» («5ч20» — отказ);
+    «Nм» — до 3 цифр («120м» = 120 мин, санкция ПМ).
+    """
     m = _RE_HHMM.match(text)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2))
@@ -122,7 +134,10 @@ def _parse_duration_minutes(text: str) -> int:
         return hour * 60 + minute
     m = _RE_HM.match(text)
     if m:
-        return int(m.group(1)) * 60 + (int(m.group(2)) if m.group(2) else 0)
+        minutes_part = int(m.group(2)) if m.group(2) else 0
+        if minutes_part > 59:
+            raise SettingsValueError(f"минуты больше 59: {text!r}")
+        return int(m.group(1)) * 60 + minutes_part
     m = _RE_M.match(text)
     if m:
         return int(m.group(1))

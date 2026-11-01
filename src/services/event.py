@@ -213,6 +213,25 @@ def list_raw_events(
     return SleepEventsRepo(conn).list_by_user(user_id)
 
 
+# -------------------------------- Удаление всех данных (3.3, FR-54, D25)
+
+def delete_all(conn: sqlite3.Connection, user_id: int) -> bool:
+    """Удалить ВСЕ данные пользователя (задача 3.3, FR-54, ТЗ §10.5, D25).
+
+    Одна транзакция (UsersRepo.delete_all_data): sleep_events, settings,
+    settings_history, строка users — явные DELETE по user_id, только
+    СВОИ данные, безвозвратно (FK без ON DELETE — каскад не используется).
+    После успешного удаления — точка ре-шедула напоминаний (FR-41,
+    design D10/D19/D25): план строится заново по пустым данным —
+    задачи «remind:<user_id>:<kind>» пользователя снимаются, план
+    напоминаний пустеет. False — пользователя не было, удалять нечего.
+    """
+    deleted = UsersRepo(conn).delete_all_data(user_id)
+    if deleted:
+        _notify_scheduler()
+    return deleted
+
+
 def overwrite_event(
     conn: sqlite3.Connection,
     event_id: int,

@@ -98,3 +98,34 @@ class UsersRepo:
         )
         self._conn.commit()
         return cur.rowcount > 0
+
+    def delete_all_data(self, user_id: int) -> bool:
+        """Удалить ВСЕ данные пользователя ОДНОЙ транзакцией (FR-54, §10.5, D25).
+
+        Задача 3.3 add-settings-history: явные DELETE по user_id —
+        sleep_events, settings, settings_history, затем строка users
+        (FK без ON DELETE — каскад не используется, дети удаляются ДО
+        строки users). commit ОДИН — частичное удаление невозможно
+        (§8.3-стиль «частичные изменения запрещены»); операция
+        безвозвратна, только данные СВОЕГО user_id (design D13/D25).
+
+        Метод именно здесь (санкция ПМ на 3.3: репозиторий settings вне
+        зоны задачи — удаление дочерних таблиц выполняется прямыми
+        DELETE из users.py, без метода в SettingsRepo).
+        True — строка users удалена (пользователь существовал);
+        False — пользователя не было, данных нет изменений.
+        """
+        self._conn.execute(
+            "DELETE FROM sleep_events WHERE user_id = ?", (user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM settings WHERE user_id = ?", (user_id,)
+        )
+        self._conn.execute(
+            "DELETE FROM settings_history WHERE user_id = ?", (user_id,)
+        )
+        cur = self._conn.execute(
+            "DELETE FROM users WHERE id = ?", (user_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0

@@ -78,6 +78,8 @@ Usage:
         [--final] [--xdist N] [--suggest-baseline] [--timeout SEC] [--json]
     flowctl.py integrate <repo> [--cid ID] [--base REF] [--registry PATH]
         [--json]
+    flowctl.py gc [--repo PATH] [--registry PATH] [--apply] [--deep]
+        [--min-age-hours N] [--json]
 
 Exit codes: 0 — успех/ALLOW/accepted (run/prepare — разрешено; regress —
 PASS); 1 — DENY/STALE_SNAPSHOT/returned (regress — FAIL); 2 — UNKNOWN/ошибка
@@ -88,7 +90,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -2504,6 +2508,481 @@ def cmd_integrate(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- gc
+# J55: механическая чистка веток/worktrees/стендов/tmp. Принцип J51: механика
+# в скрипте, dry-run по умолчанию, --apply исполняет. Четыре категории
+# (backlog/J55-gc-этап-архивации-2026-10-19.md):
+#   1. Ветки — ТОЛЬКО --merged origin/main по всем ремоутам проекта;
+#      незакрытые (имеют уникальные коммиты) вне досягаемости по построению.
+#   2. Worktrees — сессии done/closed реестра (completed/finished/released)
+#      → снос; остальные (running/needs_attention/…) → только список,
+#      решает ПМ.
+#   3. Docker — контейнеры/сети test/stand-префиксов, Exited > 24ч → rm;
+#      тома — ТОЛЬКО с --deep (данные руками); прод-префиксы вне досягаемости.
+#   4. /tmp — известные префиксы (deleg-*, стенды, пробы) по возрасту > 24ч;
+#      бэкапы НЕ удаляются никогда (перенос в /var/backups — отдельное
+#      решение, sudo).
+# НЕ трогается никогда: regress-артефакты (провенанс ворот merge),
+# code-reviews, archive/, backlog/, MAP.md — gc не пишет в рабочее дерево
+# репозитория вообще, только ветки/worktrees/внешние ресурсы.
+
+GC_SCHEMA = "flowctl-gc/1"
+GC_MIN_AGE_HOURS = 24
+# Docker: только тестовые префиксы; прод (ekotov-wiki-par-*, game-portal,
+# 3x-ui, …) не начинается с test/stand- — вне досягаемости по построению.
+GC_DOCKER_PREFIXES = ("test", "stand-")
+# /tmp: признаки gc-мусора — делегации, стенды, пробы.
+GC_TMP_SIGNS = ("deleg-", "stand", "probe")
+# Бэкапы не авто-удаляются никогда (J55: перенос в /var/backups — отдельно).
+GC_TMP_BACKUP_MARK = "backup"
+# done/closed-статусы реестра сессий → worktree под снос; остальные —
+# только список (решение ПМ).
+GC_WORKTREE_DONE = ("completed", "finished", "released")
+
+
+def gc_branch_candidates(remote_branches: list[str],
+                         merged: set[str]) -> list[str]:
+    """Юнит (J55, категория 1): кандидаты на снос — только удаленные ветки,
+    ПОЛНОСТЬЮ смерженные в origin/main (механика `git branch -r --merged`).
+    Незакрытая ветка (уникальные коммиты) в merged не попадает — вне
+    досягаемости по построению. main/HEAD исключаются всегда; символические
+    ref-сокращения без «remote/branch» (например «origin» = origin/HEAD)
+    ветками не считаются."""
+    keep = {"main", "master", "HEAD"}
+    out: list[str] = []
+    for rb in remote_branches or []:
+        if "/" not in rb:
+            continue  # символическое сокращение (origin/HEAD → «origin»)
+        short = rb.split("/", 1)[1]
+        if short in keep:
+            continue
+        if rb in merged:
+            out.append(rb)
+    return sorted(out)
+
+
+def gc_classify_worktree(session: dict, wt_exists: bool) -> tuple[str, str]:
+    """Юнит (J55, категория 2): (категория, причина) для worktree-записи
+    реестра. done/closed → remove (если путь еще существует); остальные
+    статусы — list_only (решает ПМ), НЕ трогаем."""
+    status = str((session or {}).get("status") or "")
+    wt = (session or {}).get("worktree")
+    if not wt:
+        return "skip", "в записи нет worktree"
+    if status in GC_WORKTREE_DONE:
+        return ("remove", f"сессия {status} (done/closed)") if wt_exists \
+            else ("gone", f"сессия {status}; пути уже нет")
+    return "list_only", f"статус {status!r} — не закрыт, решает ПМ"
+
+
+def gc_classify_container(name: str, state: str, age_h: float | None,
+                          prefixes: tuple[str, ...] = GC_DOCKER_PREFIXES,
+                          min_age_h: float = GC_MIN_AGE_HOURS,
+                          ) -> tuple[str, str]:
+    """Юнит (J55, категория 3): контейнер — (категория, причина).
+    Только test/stand-префиксы; только Exited; только старше min_age."""
+    if not any(name.startswith(p) for p in prefixes):
+        return "skip", "вне gc-префиксов (прод не трогается)"
+    if state != "exited":
+        return "skip", f"state={state} (только Exited)"
+    if age_h is None:
+        return "skip", "возраст неизвестен (FinishedAt не читается)"
+    if age_h < min_age_h:
+        return "skip", f"свежий ({age_h:.1f}ч < {min_age_h}ч)"
+    return "remove", f"Exited {age_h:.0f}ч"
+
+
+def gc_classify_network(name: str, age_h: float | None, attached: int,
+                        prefixes: tuple[str, ...] = GC_DOCKER_PREFIXES,
+                        min_age_h: float = GC_MIN_AGE_HOURS,
+                        ) -> tuple[str, str]:
+    """Юнит (J55, категория 3): сеть — только gc-префикс, старше min_age
+    и БЕЗ подключенных контейнеров."""
+    if not any(name.startswith(p) for p in prefixes):
+        return "skip", "вне gc-префиксов"
+    if attached:
+        return "skip", f"подключено контейнеров: {attached}"
+    if age_h is None:
+        return "skip", "возраст неизвестен (CreatedAt не читается)"
+    if age_h < min_age_h:
+        return "skip", f"свежая ({age_h:.1f}ч < {min_age_h}ч)"
+    return "remove", f"пустая, {age_h:.0f}ч"
+
+
+def gc_classify_tmp(name: str, age_h: float | None,
+                    signs: tuple[str, ...] = GC_TMP_SIGNS,
+                    min_age_h: float = GC_MIN_AGE_HOURS,
+                    ) -> tuple[str, str]:
+    """Юнит (J55, категория 4): /tmp-запись — (категория, причина).
+    Бэкапы НЕ трогаются никогда (проверка прежде признаков); дальше —
+    известные признаки (deleg-*/стенды/пробы) и возраст > min_age."""
+    if GC_TMP_BACKUP_MARK in name.lower():
+        return "keep", "бэкап — не трогается никогда (J55)"
+    if not any(s in name for s in signs):
+        return "skip", "вне gc-префиксов"
+    if age_h is None:
+        return "skip", "возраст неизвестен (mtime не читается)"
+    if age_h < min_age_h:
+        return "skip", f"свежий ({age_h:.1f}ч < {min_age_h}ч)"
+    return "remove", f"{age_h:.0f}ч"
+
+
+def gc_classify_volume(name: str,
+                       prefixes: tuple[str, ...] = GC_DOCKER_PREFIXES,
+                       ) -> tuple[str, str]:
+    """Юнит (J55, категория 3): том — кандидат только по gc-префиксу;
+    удаляется ТОЛЬКО с --deep (данные руками)."""
+    if not any(name.startswith(p) for p in prefixes):
+        return "skip", "вне gc-префиксов"
+    return "candidate", "том: снос только с --deep"
+
+
+def _gc_docker_lines(*docker_args: str) -> list[dict] | None:
+    """`docker <args> --format {{json .}}` → список JSON-объектов строк.
+    docker недоступен/ошибся → None (категория честно деградирует,
+    не молчаливый пропуск)."""
+    proc = subprocess.run(
+        ["docker", *docker_args, "--format", "{{json .}}"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    out: list[dict] = []
+    for ln in proc.stdout.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def _gc_iso_age_hours(iso: str | None, now: float | None = None,
+                      ) -> float | None:
+    """Возраст в часах от ISO-метки docker (FinishedAt/CreatedAt); Z-суффикс
+    и пустые значения («0001-01-01T00:00:00Z» у живых контейнеров) → None."""
+    if not iso or iso.startswith("0001-01-01"):
+        return None
+    now = time.time() if now is None else now
+    try:
+        ts = time.mktime(
+            time.strptime(iso.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z"))
+    except ValueError:
+        return None
+    return max(0.0, (now - ts) / 3600.0)
+
+
+def gc_collect_branches(repo: Path) -> tuple[list[str], set[str], str]:
+    """Факты по веткам: (все удаленные ветки, смерженные в origin/main,
+    диагностика). Ремоут без main — merged пуст."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "branch", "-r",
+         "--format=%(refname:short)"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return [], set(), f"git branch -r: {proc.stderr.strip()}"
+    branches = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    proc_m = subprocess.run(
+        ["git", "-C", str(repo), "branch", "-r", "--merged", "origin/main",
+         "--format=%(refname:short)"],
+        capture_output=True, text=True,
+    )
+    if proc_m.returncode != 0:
+        return branches, set(), (
+            f"нет origin/main (git branch -r --merged: "
+            f"{proc_m.stderr.strip()}) — ветки не тронуты")
+    merged = {ln.strip() for ln in proc_m.stdout.splitlines() if ln.strip()}
+    return branches, merged, "origin/main"
+
+
+def gc_collect_docker() -> tuple[dict | None, str]:
+    """Факты docker: контейнеры (кандидаты Exited), сети, тома. docker
+    недоступен → (None, причина)."""
+    containers_raw = _gc_docker_lines("ps", "-a")
+    if containers_raw is None:
+        return None, "docker ps недоступен — категория пропущена (не молча)"
+    containers: list[dict] = []
+    for line in containers_raw:
+        name = line.get("Names") or line.get("Name") or ""
+        state = str(line.get("State") or "").lower()
+        # Точный возраст только для Exited (inspect FinishedAt, ISO);
+        # живым контейнерам gc возраст не нужен.
+        age_h = None
+        if state == "exited":
+            insp = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.FinishedAt}}", name],
+                capture_output=True, text=True,
+            )
+            if insp.returncode == 0:
+                age_h = _gc_iso_age_hours(insp.stdout.strip())
+        containers.append({"name": name, "state": state, "age_h": age_h})
+
+    networks: list[dict] = []
+    nets_raw = _gc_docker_lines("network", "ls")
+    if nets_raw is not None:
+        for line in nets_raw:
+            name = line.get("Name") or ""
+            age_h = None
+            attached = -1
+            insp = subprocess.run(
+                ["docker", "network", "inspect", name],
+                capture_output=True, text=True,
+            )
+            if insp.returncode == 0:
+                try:
+                    net = json.loads(insp.stdout)[0]
+                    created = net.get("Created")
+                    if isinstance(created, str):
+                        age_h = _gc_iso_age_hours(created)
+                    attached = len(net.get("Containers") or {})
+                except (ValueError, IndexError, KeyError):
+                    pass
+            networks.append({"name": name, "age_h": age_h,
+                             "attached": attached})
+
+    volumes: list[dict] = []
+    vols_raw = _gc_docker_lines("volume", "ls")
+    if vols_raw is not None:
+        volumes = [{"name": line.get("Name") or ""} for line in vols_raw]
+
+    return ({"containers": containers, "networks": networks,
+             "volumes": volumes}, "docker ok")
+
+
+def gc_collect_tmp(root: str = "/tmp", now: float | None = None,
+                   ) -> list[dict]:
+    """Факты /tmp: записи ПЕРВОГО уровня (вглубь не трогаем) с возрастом
+    по mtime. Ошибки чтения записи — skip, не молчаливый кандидат."""
+    now = time.time() if now is None else now
+    out: list[dict] = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as exc:
+        return [{"name": f"<{root} нечитаем: {exc}>", "path": None,
+                 "age_h": None}]
+    for name in names:
+        path = os.path.join(root, name)
+        try:
+            age_h = max(0.0, (now - os.lstat(path).st_mtime) / 3600.0)
+        except OSError:
+            age_h = None
+        out.append({"name": name, "path": path, "age_h": age_h})
+    return out
+
+
+def gc_plan(args) -> dict:
+    """Сбор плана gc по 4 категориям (чистый сбор + классификация; без
+    side effects — исполнение в cmd_gc)."""
+    repo = Path(args.repo).expanduser().resolve() if args.repo else None
+    min_age = float(getattr(args, "min_age_hours", GC_MIN_AGE_HOURS))
+    plan: dict = {
+        "repo": str(repo) if repo else None,
+        "min_age_hours": min_age,
+        "protected_note": "regress-артефакты, code-reviews, archive/, "
+                          "backlog/, MAP.md не трогаются (J55)",
+    }
+
+    # 1) Ветки: только --merged origin/main (по всем ремоутам).
+    if repo is not None and repo.is_dir() and _git_head(repo):
+        branches, merged, merged_src = gc_collect_branches(repo)
+        plan["branches"] = {
+            "remove": gc_branch_candidates(branches, merged),
+            "merged_source": merged_src,
+            "total_remote": len(branches),
+        }
+    else:
+        plan["branches"] = {"remove": [], "merged_source": None,
+                            "total_remote": 0,
+                            "note": "репо не указан/не git — категория пропущена"}
+
+    # 2) Worktrees: done/closed-сессии реестра → снос; остальные — список.
+    registry_path = Path(args.registry).expanduser() if args.registry else (
+        Path.home() / ".hermes" / "state" / "active_sessions.json")
+    remove_wt: list[dict] = []
+    list_only: list[dict] = []
+    wt_note = ""
+    data, err = sc.registry_load(registry_path)
+    if err:
+        wt_note = f"реестр нечитаем ({err}) — категория пропущена (не молча)"
+    else:
+        for s in data.get("sessions", []):
+            if not isinstance(s, dict):
+                continue
+            if repo is not None and not _session_in_repo(s, repo):
+                continue
+            cat, reason = gc_classify_worktree(
+                s, bool(s.get("worktree")) and Path(s["worktree"]).exists())
+            row = {"delegation_id": s.get("delegation_id"),
+                   "status": s.get("status"), "worktree": s.get("worktree"),
+                   "reason": reason}
+            if cat == "remove":
+                remove_wt.append(row)
+            elif cat == "list_only":
+                list_only.append(row)
+    plan["worktrees"] = {"remove": remove_wt, "list_only": list_only,
+                         "registry": str(registry_path), "note": wt_note}
+
+    # 3) Docker: контейнеры/сети по префиксам и возрасту; тома — список
+    #    (снос только --deep).
+    docker, docker_note = gc_collect_docker()
+    dcat: dict = {"note": docker_note}
+    if docker is None:
+        dcat["unavailable"] = True
+    else:
+        for key, classify in (
+                ("containers", lambda d: gc_classify_container(
+                    d["name"], d["state"], d["age_h"], min_age_h=min_age)),
+                ("networks", lambda d: gc_classify_network(
+                    d["name"], d["age_h"], d["attached"], min_age_h=min_age)),
+        ):
+            rm, skip = [], []
+            for d in docker[key]:
+                cat, reason = classify(d)
+                (rm if cat == "remove" else skip).append(
+                    {**d, "reason": reason})
+            dcat[key] = {"remove": rm, "skipped": skip}
+        vol_cand, vol_skip = [], []
+        for v in docker["volumes"]:
+            cat, reason = gc_classify_volume(v["name"])
+            (vol_cand if cat == "candidate" else vol_skip).append(
+                {**v, "reason": reason})
+        dcat["volumes"] = {"candidates": vol_cand, "skipped": vol_skip,
+                           "note": "тома удаляются ТОЛЬКО с --deep "
+                                   "(данные — руками, J55)"}
+    plan["docker"] = dcat
+
+    # 4) /tmp: deleg-*/стенды/пробы по возрасту; бэкапы — keep всегда.
+    rm_t, keep_t, skip_t = [], [], []
+    for entry in gc_collect_tmp():
+        cat, reason = gc_classify_tmp(entry["name"], entry["age_h"],
+                                      min_age_h=min_age)
+        row = {**entry, "reason": reason}
+        if cat == "remove":
+            rm_t.append(row)
+        elif cat == "keep":
+            keep_t.append(row)
+        else:
+            skip_t.append(row)
+    plan["tmp"] = {"remove": rm_t, "keep": keep_t, "skipped": skip_t,
+                   "root": "/tmp"}
+    return plan
+
+
+def gc_apply(plan: dict, deep: bool = False) -> tuple[list[str], list[str]]:
+    """Исполнение плана (--apply). Возвращает (выполненные, ошибки).
+    Порядок категорий: ветки → worktrees → docker → /tmp. Тома — только
+    с deep=True."""
+    done: list[str] = []
+    errors: list[str] = []
+
+    for rb in (plan.get("branches") or {}).get("remove", []):
+        remote, _, branch = rb.partition("/")
+        repo = plan.get("repo")
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "push", remote, "--delete", branch],
+            capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            done.append(f"branch: {rb} (push {remote} --delete)")
+        else:
+            errors.append(f"branch {rb}: {proc.stderr.strip()}")
+
+    for row in (plan.get("worktrees") or {}).get("remove", []):
+        wt = row.get("worktree")
+        repo = plan.get("repo")
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "worktree", "remove", "--force",
+             str(wt)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            done.append(f"worktree: {wt} ({row.get('delegation_id')})")
+        else:
+            errors.append(
+                f"worktree {wt}: {proc.stderr.strip()} "
+                f"(снеси руками: rm -rf {wt} && git worktree prune)")
+
+    docker = plan.get("docker") or {}
+    if not docker.get("unavailable"):
+        for c in (docker.get("containers") or {}).get("remove", []):
+            proc = subprocess.run(["docker", "rm", c["name"]],
+                                  capture_output=True, text=True)
+            (done if proc.returncode == 0 else errors).append(
+                f"docker rm {c['name']}" if proc.returncode == 0
+                else f"docker rm {c['name']}: {proc.stderr.strip()}")
+        for n in (docker.get("networks") or {}).get("remove", []):
+            proc = subprocess.run(["docker", "network", "rm", n["name"]],
+                                  capture_output=True, text=True)
+            (done if proc.returncode == 0 else errors).append(
+                f"docker network rm {n['name']}" if proc.returncode == 0
+                else f"docker network rm {n['name']}: {proc.stderr.strip()}")
+        if deep:
+            for v in (docker.get("volumes") or {}).get("candidates", []):
+                proc = subprocess.run(["docker", "volume", "rm", v["name"]],
+                                      capture_output=True, text=True)
+                (done if proc.returncode == 0 else errors).append(
+                    f"docker volume rm {v['name']}" if proc.returncode == 0
+                    else f"docker volume rm {v['name']}: "
+                         f"{proc.stderr.strip()}")
+
+    for row in (plan.get("tmp") or {}).get("remove", []):
+        path = row.get("path")
+        try:
+            p = Path(path)
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            elif p.exists() or p.is_symlink():
+                p.unlink()
+            done.append(f"tmp: {path} ({row['name']})")
+        except OSError as exc:
+            errors.append(f"tmp {path}: {exc}")
+    return done, errors
+
+
+def cmd_gc(args) -> int:
+    """J55: dry-run по умолчанию (печать плана), --apply исполняет."""
+    plan = gc_plan(args)
+    apply_mode = bool(getattr(args, "apply", False))
+    deep = bool(getattr(args, "deep", False))
+    counts = {
+        "branches": len(plan["branches"]["remove"]),
+        "worktrees": len(plan["worktrees"]["remove"]),
+        "docker_containers": len((plan["docker"].get("containers")
+                                  or {}).get("remove", []))
+        if not plan["docker"].get("unavailable") else 0,
+        "docker_networks": len((plan["docker"].get("networks")
+                                or {}).get("remove", []))
+        if not plan["docker"].get("unavailable") else 0,
+        "docker_volumes": len((plan["docker"].get("volumes")
+                               or {}).get("candidates", []))
+        if not plan["docker"].get("unavailable") else 0,
+        "tmp": len(plan["tmp"]["remove"]),
+    }
+    payload = {
+        "schema_version": GC_SCHEMA, "command": "gc",
+        "dry_run": not apply_mode, "deep": deep,
+        "plan": plan, "counts": counts,
+        "note": ("dry-run: ничего не удалено; --apply исполняет план"
+                 if not apply_mode else
+                 "apply: тома сносились только с --deep"
+                 if deep else "apply: тома НЕ тронуты (нужен --deep, J55)"),
+    }
+    if not apply_mode:
+        _emit(payload, args.as_json)
+        return 0
+    done, errors = gc_apply(plan, deep=deep)
+    payload["applied"] = done
+    payload["errors"] = errors
+    payload["note"] += f"; выполнено: {len(done)}, ошибок: {len(errors)}"
+    _emit(payload, args.as_json)
+    return 1 if errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Прокси на поставки 02–03: argv передается целиком (argparse.REMAINDER
     # не пробрасывает опции, начинающиеся с «-», поэтому маршрутизация до
@@ -2727,6 +3206,27 @@ def main(argv: list[str] | None = None) -> int:
                        help="путь к active_sessions.json (fixture в тестах)")
     p_int.add_argument("--json", action="store_true", dest="as_json")
     p_int.set_defaults(func=cmd_integrate)
+
+    # J55: механическая чистка веток/worktrees/стендов/tmp — dry-run по
+    # умолчанию, --apply исполняет; regress-артефакты/бэкапы не трогаются.
+    p_gc = sub.add_parser(
+        "gc", help="чистка merged-веток/worktrees закрытых сессий/стендов/"
+                   "tmp (J55; dry-run по умолчанию)")
+    p_gc.add_argument("--repo", default=None,
+                      help="репозиторий (ветки/worktrees); без него — только "
+                           "docker/tmp-категории")
+    p_gc.add_argument("--registry", default=None,
+                      help="путь к active_sessions.json (fixture в тестах)")
+    p_gc.add_argument("--apply", action="store_true",
+                      help="исполнить план (по умолчанию — dry-run, печать)")
+    p_gc.add_argument("--deep", action="store_true",
+                      help="также сносить docker-ТОМА gc-префиксов "
+                           "(данные — руками; без --deep тома только список)")
+    p_gc.add_argument("--min-age-hours", type=float, default=GC_MIN_AGE_HOURS,
+                      help="порог возраста контейнеров/сетей/tmp, ч "
+                           f"(default: {GC_MIN_AGE_HOURS})")
+    p_gc.add_argument("--json", action="store_true", dest="as_json")
+    p_gc.set_defaults(func=cmd_gc)
 
     args = ap.parse_args(argv)
 

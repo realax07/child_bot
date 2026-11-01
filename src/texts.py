@@ -511,3 +511,107 @@ def undo_done_text(label: str, local_hhmm: str, leftover: str) -> str:
     факты дня (PB-3) либо строка пустого дня UNDO_LEFTOVER_EMPTY.
     """
     return f"Отменено: {label} {local_hhmm}.\n\n{leftover}"
+
+
+# ------------------------------------------------ Настройки §7.16–7.19
+# (add-settings-history, задача 1.2; design D21): формулировки ТЗ дословно;
+# экран собирает handlers/settings_screen.py из групп и фактических значений
+# SettingsService (без копий ключей — D14). Разметка исходника (**, `)
+# идёт в текст КАК ЕСТЬ: parse_mode не используется — так же, как `10:50`
+# в §7.11 выше. Состав экрана — параметры §7.16 + target_nap_duration в
+# «Прочее» (13-й ключ, решение №1 от 26.10 — допущение D21).
+
+# §7.16 — шапка и подвал дословно (строки групп/параметров собирают
+# settings_group_line / settings_param_line ниже).
+SETTINGS_SCREEN_HEADER = "⚙️ **Настройки**"
+SETTINGS_SCREEN_FOOTER = "Нажмите на параметр, чтобы изменить."
+
+# Заголовки групп §7.16 — дословно.
+SETTINGS_GROUP_DAY = "Режим дня"
+SETTINGS_GROUP_NIGHT = "Ночной сон"
+SETTINGS_GROUP_WAKE = "Бодрствование"
+SETTINGS_GROUP_MISC = "Прочее"
+
+# Подписи параметров: §7.16 дословно; «Максимальная глубина ввода» — §5
+# (12-й параметр из tasks.md «12 параметров §7.16»), «Целевая длительность
+# дневного сна» — 13-й ключ (допущение D21).
+SETTINGS_PARAM_LABELS: dict[str, str] = {
+    "sleep_min_before_nap": "Минимум бодрствования до дневного сна",
+    "sleep_max_before_nap": "Максимум бодрствования до дневного сна",
+    "wake_deadline": "Крайнее время пробуждения от дневного сна",
+    "night_target": "Целевое время ухода",
+    "night_deadline": "Крайнее время ухода",
+    "wake_total_min": "Нижняя граница",
+    "wake_total_max": "Верхняя граница",
+    "remind_before": "Напоминание заранее",
+    "merge_threshold": "Порог склейки снов",
+    "night_bounds": "Границы ночного сна",
+    "day_start": "Начало дня",
+    "backfill_depth_days": "Максимальная глубина ввода",
+    "target_nap_duration": "Целевая длительность дневного сна",
+}
+
+
+def settings_group_line(group: str) -> str:
+    """Заголовок группы §7.16: «**Режим дня**» — разметка как в исходнике."""
+    return f"**{group}**"
+
+
+def settings_param_line(label: str, value_line: str) -> str:
+    """Строка параметра §7.16: «- Минимум бодрствования до дневного сна: 5 ч 20 мин»."""
+    return f"- {label}: {value_line}"
+
+
+# Форматы §7.17/§7.19 по типу параметра (design D21: типы валидации
+# SettingsService). Длительность — дословно §7.17; остальные — служебные
+# формулировки по типам ключей (в §7.17 показан только длительный случай).
+SETTINGS_FORMAT_DURATION = "`5:20` или `5ч20м`"
+SETTINGS_FORMAT_TIME = "`ЧЧ:ММ` (например, `15:30`)"
+SETTINGS_FORMAT_HOURS = "число часов (например, `12.5`)"
+SETTINGS_FORMAT_WINDOW = "`ЧЧ:ММ-ЧЧ:ММ` (например, `19:00-07:00`)"
+SETTINGS_FORMAT_DAYS = "целое число дней (например, `3`)"
+
+
+def settings_ask_value_text(label: str, current_line: str, format_line: str) -> str:
+    """§7.17 дословно: имя параметра, текущее значение, формат."""
+    return (
+        f"Введите новое значение для «{label}».\n"
+        f"Текущее: {current_line}.\n"
+        f"Формат: {format_line}."
+    )
+
+
+def settings_updated_text(label: str, old_line: str, new_line: str) -> str:
+    """§7.18 дословно: «старое → новое»."""
+    return f"✅ «{label}» обновлён: {old_line} → {new_line}."
+
+
+def settings_bad_value_text(format_line: str) -> str:
+    """§7.19 дословно: неразбираемый ввод (настройка не изменилась)."""
+    return f"Не могу разобрать значение. Попробуйте формат {format_line}."
+
+
+def days_line(days: int) -> str:
+    """Значение в днях для экрана настроек: «3 дня» (служебный формат §5)."""
+    if days % 100 in (11, 12, 13, 14):
+        word = "дней"
+    elif days % 10 == 1:
+        word = "день"
+    elif days % 10 in (2, 3, 4):
+        word = "дня"
+    else:
+        word = "дней"
+    return f"{days} {word}"
+
+
+# Отмена диалога значения (FSM WAIT_SETTING_VALUE, §10.4) — служебные
+# тексты вне ТЗ §7: кнопка под §7.17 и ответ без изменения настройки.
+SETTINGS_BTN_CANCEL = "Отменить"
+SETTINGS_CANCELLED = "Ввод отменён — настройки не изменены."
+
+# Вежливый отказ наблюдателю при попытке правки (design D13: настройки —
+# read-only, экран наблюдатель ВИДИТ). Служебный текст вне ТЗ §7 — единая
+# точка здесь (по образцу OBSERVER_DENIED, review-001-2.4 note 1).
+OBSERVER_SETTINGS_DENIED = (
+    "Просмотр настроек доступен, а изменение — только владельцу дневника."
+)

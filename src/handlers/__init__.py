@@ -24,7 +24,7 @@ def register_handlers(application) -> None:
     """
     from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-    from src.handlers import backfill, common, events, hint, start, undo
+    from src.handlers import backfill, common, events, hint, settings_screen, start, undo
 
     application.add_handler(CommandHandler("start", start.start_command))
     application.add_handler(
@@ -66,4 +66,26 @@ def register_handlers(application) -> None:
             backfill.conflict_callback,
             pattern=r"^conflict:(overwrite|cancel)$",
         )
+    )
+    # ⚙️ Настройки (add-settings-history 1.2, ТЗ §10.2–10.4, design D21):
+    # команда /settings, колбэки settings:show / settings:edit:<key> /
+    # settings:cancel — единая точка settings_callback.
+    application.add_handler(
+        CommandHandler("settings", settings_screen.settings_command)
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            settings_screen.settings_callback,
+            pattern=settings_screen.CALLBACK_PATTERN,
+        )
+    )
+    # Ввод значения настройки — в ОТДЕЛЬНОЙ группе (group=2): группа 0
+    # занята диалогом backfill (матчит весь текст), группа 1 — reply-панель.
+    # Вне фазы WAIT_SETTING_VALUE обработчик молча пропускает текст.
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            settings_screen.setting_value_message,
+        ),
+        group=2,
     )

@@ -129,18 +129,26 @@ async def reply_button_message(
     тексту (state.kind_of_button / BTN_UNDO); «⏰ Подсказка сейчас»
     (BTN_HINT) — текстовый маршрут к логике подсказки hint.py (ТЗ §6,
     2.2-fix: callback status:show и текст панели — двойной вход, ТЗ
-    §10.3). Состояние перечитывается
-    из БД (guard D5, services.state). Произвольный текст (не кнопка) —
-    молча без реакции: диалоги заднего числа ведёт backfill.py (задача
-    4.1 — не ломаем). Регистрируется в ОТДЕЛЬНОЙ группе PTB (group=1):
-    MessageHandler backfill.py (группа 0) вне фазы диалога молчит, и
-    обновление доходит и до него, и до этого обработчика.
+    §10.3); «⚙️ Настройки» (settings_screen.BTN_SETTINGS) — текстовый
+    маршрут к экрану настроек (add-settings-history 1.2: callback
+    settings:show и текст панели — тот же двойной вход). Сама кнопка
+    в state.REPLY_KEYBOARD появится в волне 2 (задача 2.0, state.py вне
+    зоны задачи 1.2) — текстовый маршрут уже подключён. Состояние
+    перечитывается из БД (guard D5, services.state). Произвольный текст
+    (не кнопка) — молча без реакции: диалоги заднего числа ведёт
+    backfill.py (задача 4.1 — не ломаем), значения настроек —
+    settings_screen.py (фаза WAIT_SETTING_VALUE, группа 2). Регистрируется
+    в ОТДЕЛЬНОЙ группе PTB (group=1): MessageHandler backfill.py (группа 0)
+    вне фазы диалога молчит, и обновление доходит и до него, и до этого
+    обработчика.
     """
-    from src.handlers import events, hint, undo  # лениво: events/undo импортируют common
+    from src.handlers import events, hint, settings_screen, undo  # лениво: events/undo импортируют common
 
     message = update.effective_message
     text = message.text if message is not None else None
-    if text is None or text not in state.REPLY_BUTTONS:
+    if text is None or (
+        text not in state.REPLY_BUTTONS and text != settings_screen.BTN_SETTINGS
+    ):
         return
     if update.effective_user is None:
         return
@@ -153,6 +161,9 @@ async def reply_button_message(
             return
         if text == state.BTN_HINT:
             await hint.reply_hint_button(update, context, conn, user)
+            return
+        if text == settings_screen.BTN_SETTINGS:
+            await settings_screen.reply_settings_button(update, context, conn, user)
             return
         kind = state.kind_of_button(text)
         if kind is not None:

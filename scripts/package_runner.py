@@ -27,7 +27,9 @@
                          role-agents.md → AGENTS.md в worktree, а если там
                          уже есть AGENTS.md проекта — рядом как AGENTS.pi.md
                          с пометкой «читай вместе с AGENTS.md»; вызов
-                         `pi --no-session` с zone-guard, env PI_ZONE_WRITE);
+                         `pi --no-session` с zone-guard, env PI_ZONE_WRITE
+                         — зоны в префикс-форме guard'а: glob-хвосты `/**`,
+                         `/*`, `**` и слэши срезаются normalize_zone, J61);
     run: gate:<команда>— shell-команда в worktree (env стенда E6 —
                          EKOTOV_WIKI_BASE_URL/EKOTOV_WIKI_DB_PATH — срезается;
                          скоуп тестов — ответственность gate-команды);
@@ -97,6 +99,14 @@ LOG_SUFFIX = ".runner.log"
 # collection error (дефект пилота BUG-026). Скоуп тестов — ответственность
 # самой gate-команды (см. docs/guides/pipeline-manifest.md).
 GATE_ENV_STRIP = ("EKOTOV_WIKI_BASE_URL", "EKOTOV_WIKI_DB_PATH")
+# Glob-хвост зон манифеста: zone-guard матчит зоны ПРЕФИКСОМ
+# (norm === z || norm.startsWith(z + "/")), поэтому glob-форма
+# `services/images/**` как префикс `services/images/***/` не матчится
+# ни с одним путем — guard уходил в дефолтные зоны (J61, пилот BUG-026).
+# Перед склейкой PI_ZONE_WRITE хвостовые `/**`, `/*`, `**` и слэши
+# срезаются (normalize_zone).
+_ZONE_GLOB_TAIL_RE = re.compile(r"(?:/\*\*?)+/?$")
+_ZONE_LEADING_DOT_RE = re.compile(r"^\./")
 STATE_SCHEMA = "package-runner-state/1"
 
 RUN_KINDS = ("pi", "hermes", "gate")
@@ -350,6 +360,21 @@ def parse_manifest(plan_path: Path) -> dict:
         }
         stages.append(stage)
     return {"package": package, "flow": flow, "stages": stages}
+
+
+def normalize_zone(zone: str) -> str:
+    """Glob-зона манифеста → префикс для zone-guard (J61): guard матчит
+    зоны префиксом (`norm === z || norm.startsWith(z + "/")`), поэтому
+    glob-форма `services/images/**` не матчится ни с одним путем.
+    Срезает хвостовые `/**`, `/*`, `**` и слэши; ведущий `./` снимается
+    (паритет с guard'ом). Плоская форма проходит без изменений:
+    `services/images/**` → `services/images`, `tests` → `tests`.
+    Голый `**`/`*` («весь репо») префиксом не выражается — остается
+    как есть (guard такую зону не совпадет; осознанное ограничение v0).
+    """
+    z = _ZONE_LEADING_DOT_RE.sub("", zone.strip())
+    z = _ZONE_GLOB_TAIL_RE.sub("", z)
+    return z.rstrip("/")
 
 
 def sequence_warnings(stages: list[dict]) -> list[str]:
@@ -726,7 +751,10 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             agents_target.write_text(role_text, encoding="utf-8")
         provider, model = pi_provider_model(stage["payload"])
         env = dict(os.environ)
-        env["PI_ZONE_WRITE"] = ":".join(stage["zones"])
+        # Зоны — в префикс-форме guard'а: срез glob-хвостов (J61,
+        # дефект пилота BUG-026 — guard матчит префиксом, не glob'ом).
+        env["PI_ZONE_WRITE"] = ":".join(
+            normalize_zone(z) for z in stage["zones"])
         args = ["pi", "--provider", provider, "--model", model,
                 "--no-session", "-e", str(ZONE_GUARD),
                 "-p", build_brief(manifest, stage, agents_file.name)]

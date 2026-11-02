@@ -1,0 +1,24 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "//": "Аудитор: ручной вызов ПМ (вне конвейера/флоу). Ключ kimi — в ~/.pi/agent/models.json (600).",
+  "defaultProvider": "kimi",
+  "defaultModel": "k3.1-pro",
+  "defaultThinkingLevel": "off",
+  "defaultTools": [
+    "read",
+    "bash",
+    "grep"
+  ],
+  "sessionDir": "~/.pi/agent/sessions/auditor",
+  "extensions": [
+    "~/.pi/agent/extensions/auditor-readonly.ts"
+  ],
+  "quietStartup": true,
+  "compaction": {
+    "enabled": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2
+  }
+}

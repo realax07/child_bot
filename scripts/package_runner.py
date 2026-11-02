@@ -34,6 +34,16 @@
                          EKOTOV_WIKI_BASE_URL/EKOTOV_WIKI_DB_PATH — срезается;
                          скоуп тестов — ответственность gate-команды);
                          ненулевой exit → STOP;
+    run: stand:<команда> — подъем стенда в worktree (J62): из stdout парсятся
+                         строки «export VAR=value» (формат scripts/qa_stand_up.sh)
+                         и сохраняются в state (stand_env) — env всех
+                         ПОСЛЕДУЮЩИХ pi/gate стадий пакета получает эти
+                         переменные. В stdout нет ни одного export → STOP
+                         (стенд не отчитался env). Гашение стенда НЕ
+                         выполняется автоматически: сироту подберет
+                         reaper/gc (scripts/stand_reaper.py) или погасит ПМ
+                         вручную (`bash scripts/qa_stand_up.sh stop` в
+                         worktree); в конце прогона раннер печатает напоминание.
     run: hermes:<роль> — стоп-точка ПМ: раннер печатает «ЖДУ ПМ …», exit 0;
                          после действий ПМ повторный запуск докатывает пакет.
 
@@ -47,7 +57,14 @@ resume = пропуск stage со статусом done (остановленн
 исполняется заново — ретраев нет); чужой state (другой package/plan) —
 RUNNER-STOP. hermes:-шаг получает статус waited: повторный запуск после
 ПМ-действий считает его обработанным и докатывает пакет (диспатч — ручной,
-раннер факт ПМ-работы не проверяет).
+раннер факт ПМ-работы не проверяет). stand_env (J62) тоже живет в state —
+resume докатывает пакет с тем же env стенда.
+
+Вердикт-ворота (J62): у pi/gate стадии может быть ключ `verdict:`
+{file: путь, contains: маркер} — после успешной стадии runner проверяет,
+что файл в worktree содержит маркер (например «Одобрить» в review-файле);
+не найдено → STOP «ЖДУ ПМ: возврат ревью» (exit 2, stage stopped, при
+повторе стадия переисполняется — как gate-отказ, ретраев нет).
 
 Вывод стадий не теряется: хвост stdout/stderr каждой стадии (≤50 строк)
 сохраняется в state (stdout_tail/stderr_tail) и в лог <план>.runner.log.
@@ -107,9 +124,13 @@ GATE_ENV_STRIP = ("EKOTOV_WIKI_BASE_URL", "EKOTOV_WIKI_DB_PATH")
 # срезаются (normalize_zone).
 _ZONE_GLOB_TAIL_RE = re.compile(r"(?:/\*\*?)+/?$")
 _ZONE_LEADING_DOT_RE = re.compile(r"^\./")
+# Строки «export VAR=value» в stdout stand-стадии (формат scripts/qa_stand_up.sh:
+# ведущие пробелы допустимы — скрипт печатает их с отступом «  export …»).
+STAND_EXPORT_RE = re.compile(
+    r"^[ \t]*export[ \t]+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.MULTILINE)
 STATE_SCHEMA = "package-runner-state/1"
 
-RUN_KINDS = ("pi", "hermes", "gate")
+RUN_KINDS = ("pi", "hermes", "gate", "stand")
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FENCED_YAML_RE = re.compile(r"```yaml\s*\n(.*?)```", re.DOTALL)
 
@@ -279,7 +300,8 @@ def extract_pipeline(text: str) -> dict:
 def parse_manifest(plan_path: Path) -> dict:
     """Валидирует манифест плана. Возвращает нормализованный dict:
     {package, flow, stages: [{id, kind, payload, zones, inputs, task,
-    description, gate, depends}]}. Ошибки — ManifestError (без side effects)."""
+    description, gate, depends, verdict}]}. Ошибки — ManifestError
+    (без side effects)."""
     try:
         text = plan_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -347,6 +369,20 @@ def parse_manifest(plan_path: Path) -> dict:
             raise ManifestError(
                 f"{where}.zones: зона с ':' недопустима "
                 f"(PI_ZONE_WRITE разделяется по ':'): {bad!r}")
+        verdict = raw.get("verdict")
+        if verdict is not None:
+            # Вердикт-ворота стадии (J62): файл в worktree обязан содержать
+            # маркер (например «Одобрить»), иначе STOP «ЖДУ ПМ: возврат ревью».
+            if not isinstance(verdict, dict):
+                raise ManifestError(
+                    f"{where}.verdict: ожидается отображением "
+                    "{file: путь, contains: маркер}")
+            for field in ("file", "contains"):
+                val = verdict.get(field)
+                if not isinstance(val, str) or not val.strip():
+                    raise ManifestError(
+                        f"{where}.verdict.{field} обязателен "
+                        "(непустая строка)")
         stage = {
             "id": sid,
             "kind": kind,
@@ -357,6 +393,9 @@ def parse_manifest(plan_path: Path) -> dict:
             "description": (raw.get("description") or "").strip(),
             "gate": (raw.get("gate") or "").strip(),
             "depends": [d.strip() for d in (raw.get("depends") or [])],
+            "verdict": ({"file": verdict["file"].strip(),
+                         "contains": verdict["contains"].strip()}
+                        if isinstance(verdict, dict) else None),
         }
         stages.append(stage)
     return {"package": package, "flow": flow, "stages": stages}
@@ -375,6 +414,34 @@ def normalize_zone(zone: str) -> str:
     z = _ZONE_LEADING_DOT_RE.sub("", zone.strip())
     z = _ZONE_GLOB_TAIL_RE.sub("", z)
     return z.rstrip("/")
+
+
+def parse_stand_env(stdout: str) -> dict[str, str]:
+    """Строки «export VAR=value» из stdout stand-стадии → dict (J62).
+    Формат scripts/qa_stand_up.sh: ведущие пробелы допустимы; парные
+    кавычки вокруг значения снимаются. Строки без export игнорируются."""
+    env: dict[str, str] = {}
+    for m in STAND_EXPORT_RE.finditer(stdout or ""):
+        name, val = m.group(1), m.group(2).strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        env[name] = val
+    return env
+
+
+def check_verdict(worktree: Path, verdict: dict) -> str | None:
+    """Вердикт-ворота стадии (J62): файл обязан содержать маркер.
+    Возвращает None (ворота пройдены) или текст отказа (STOP)."""
+    path = worktree / verdict["file"]
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return (f"вердикт-ворота: файл вердикта не читается: "
+                f"{verdict['file']} ({exc})")
+    if verdict["contains"] not in text:
+        return (f"вердикт-ворота: маркер {verdict['contains']!r} не найден "
+                f"в {verdict['file']}")
+    return None
 
 
 def sequence_warnings(stages: list[dict]) -> list[str]:
@@ -554,17 +621,26 @@ def run_pi(args: list[str], cwd: Path, env: dict,
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def gate_env() -> dict:
+def gate_env(stand_env: dict | None = None) -> dict:
     """Env для gate-команд: наследуется от раннера, но переменные стенда
     (E6) срезаются (эквивалент env -u EKOTOV_WIKI_BASE_URL EKOTOV_WIKI_DB_PATH).
-    Скоуп тестов — ответственность самой gate-команды."""
-    return {k: v for k, v in os.environ.items() if k not in GATE_ENV_STRIP}
+    Скоуп тестов — ответственность самой gate-команды. stand_env (J62) —
+    переменные, отчитавшиеся stand-стадией пакета: накладываются ПОСЛЕ
+    срезки (осознанный export манифеста проходит, случайное наследование
+    окружения раннера — нет)."""
+    env = {k: v for k, v in os.environ.items() if k not in GATE_ENV_STRIP}
+    if stand_env:
+        env.update(stand_env)
+    return env
 
 
-def run_shell(cmd: str, cwd: Path, timeout: int) -> tuple[int, str, str]:
-    """Точка подмены в тестах (gate-команды); env — gate_env() (без стенда)."""
+def run_shell(cmd: str, cwd: Path, timeout: int,
+              stand_env: dict | None = None) -> tuple[int, str, str]:
+    """Точка подмены в тестах (gate/stand-команды); env — gate_env()
+    (без стенда из окружения раннера, со stand_env stand-стадий пакета)."""
     proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
-                          text=True, timeout=timeout, env=gate_env())
+                          text=True, timeout=timeout,
+                          env=gate_env(stand_env))
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -670,6 +746,9 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
     print(f"RUNNER: state: {spath}")
     done = {sid for sid, rec in state.get("stages", {}).items()
             if rec.get("status") in ("done", "waited")}
+    # Env стенда stand-стадий пакета (J62): живет в state — resume докатывает
+    # пакет с тем же env (stand-стадия не переисполняется, она done).
+    stand_env: dict[str, str] = dict(state.get("stand_env") or {})
 
     # F12: суффикс-хэш пакета — «a b»/«a/b»/«a-b» не делят одну сессию.
     sane = _UNSAFE_RE.sub("-", manifest["package"]).strip("-")
@@ -712,7 +791,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
 
         if stage["kind"] == "gate":
             try:
-                rc, out, err = run_shell(stage["payload"], worktree, timeout)
+                rc, out, err = run_shell(stage["payload"], worktree, timeout,
+                                         stand_env=stand_env)
             except subprocess.TimeoutExpired as exc:
                 return _stop(stage, f"таймаут gate ({timeout}с)", None,
                              timeout_stream(exc.stdout),
@@ -728,6 +808,50 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 pass
             journal_append(plan_path, f"{utcnow_iso()} | stage "
                            f"{stage['id']} | gate:{stage['payload']} | ok")
+            done.add(stage["id"])
+            if stage["verdict"]:
+                problem = check_verdict(worktree, stage["verdict"])
+                if problem:
+                    return _stop(stage,
+                                 f"{problem} — ЖДУ ПМ: возврат ревью", None)
+            continue
+
+        if stage["kind"] == "stand":
+            # Подъем стенда (J62): stdout обязан отчитаться «export VAR=value»
+            # (формат scripts/qa_stand_up.sh) — иначе STOP: без env стенда
+            # последующие стадии гарантированно красные, молчаливый проход
+            # только переносил бы отказ глубже.
+            try:
+                rc, out, err = run_shell(stage["payload"], worktree, timeout)
+            except subprocess.TimeoutExpired as exc:
+                return _stop(stage, f"таймаут stand ({timeout}с)", None,
+                             timeout_stream(exc.stdout),
+                             timeout_stream(exc.stderr))
+            if rc != 0:
+                return _stop(stage, f"stand exit {rc}", rc, out, err)
+            parsed = parse_stand_env(out)
+            if not parsed:
+                return _stop(stage, "stand: в stdout нет export VAR=value "
+                             "(стенд не отчитался env — формат "
+                             "scripts/qa_stand_up.sh)", rc, out, err)
+            stand_env.update(parsed)
+            state["stand_env"] = dict(stand_env)
+            exported = ", ".join(sorted(parsed))
+            state_record(state, stage["id"], "done",
+                         f"stand ok: {exported}", 0, out, err)
+            state_write(spath, state)
+            try:
+                log_append(plan_path, stage, "ok", out, err)
+            except OSError:
+                pass
+            journal_append(plan_path, f"{utcnow_iso()} | stage "
+                           f"{stage['id']} | stand:{stage['payload']} | ok "
+                           f"({exported})")
+            print(f"RUNNER: stage {stage['id']} — стенд поднят, "
+                  f"export: {exported}")
+            print("RUNNER: гашение стенда НЕ выполняется автоматически — "
+                  "сироту подберет reaper/gc (scripts/stand_reaper.py) "
+                  "или погаси вручную")
             done.add(stage["id"])
             continue
 
@@ -755,6 +879,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         # дефект пилота BUG-026 — guard матчит префиксом, не glob'ом).
         env["PI_ZONE_WRITE"] = ":".join(
             normalize_zone(z) for z in stage["zones"])
+        # Env стенда stand-стадий пакета (J62) — всем последующим pi-стадиям.
+        env.update(stand_env)
         args = ["pi", "--provider", provider, "--model", model,
                 "--no-session", "-e", str(ZONE_GUARD),
                 "-p", build_brief(manifest, stage, agents_file.name)]
@@ -787,9 +913,21 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         journal_append(plan_path, f"{utcnow_iso()} | stage {stage['id']} | "
                        f"pi:{stage['payload']} | ok")
         done.add(stage["id"])
+        # Вердикт-ворота (J62): после успешной pi-стадии (и ее gate) файл
+        # вердикта обязан содержать маркер («Одобрить»), иначе STOP.
+        if stage["verdict"]:
+            problem = check_verdict(worktree, stage["verdict"])
+            if problem:
+                return _stop(stage, f"{problem} — ЖДУ ПМ: возврат ревью",
+                             None)
 
     print(f"RUNNER: пакет {manifest['package']} докатан "
           f"({len(manifest['stages'])} stage); state: {spath}")
+    if any(s["kind"] == "stand" for s in manifest["stages"]):
+        # Гашение стенда НЕ автоматом (J62): сироту подберет reaper/gc.
+        print("RUNNER: стенд пакета оставлен работать — гашение НЕ автоматом "
+              "(reaper/gc подберет сироту, scripts/stand_reaper.py), "
+              "или погаси вручную (`bash scripts/qa_stand_up.sh stop` в worktree)")
     print(f"RUNNER: очистка сессии (по желанию): "
           f"{WORKTREE_SCRIPT.name} remove {repo} {session_id}")
     return 0

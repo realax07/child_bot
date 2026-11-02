@@ -1,0 +1,18 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "//": "Пример настроек сессии regress-runner. Ложится в ~/.pi/agent/settings.json (агент-директория) ЛИБО в .pi/settings.json корня worktree (тогда требует project trust). НЕ содержит секретов: ключ zai живет в ~/.pi/agent/models.json (chmod 600).",
+  "defaultProvider": "zai-glm",
+  "defaultModel": "glm-5.3-flash",
+  "defaultThinkingLevel": "off",
+  "defaultTools": ["read", "bash", "edit", "write"],
+  "sessionDir": "~/.pi/agent/sessions/regress-runner",
+  "extensions": ["~/.pi/agent/extensions/zone-guard.ts"],
+  "quietStartup": true,
+  "compaction": {
+    "enabled": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2
+  }
+}

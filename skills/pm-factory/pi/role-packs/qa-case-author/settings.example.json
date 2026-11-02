@@ -1,0 +1,18 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "//": "Пример настроек сессии qa_case_author. Ложится в ~/.pi/agent/settings.json (агент-директория) ЛИБО в .pi/settings.json корня worktree (тогда требует project trust). НЕ содержит секретов: ключ zai живет в ~/.pi/agent/models.json (chmod 600). Зоны записи задает env PI_ZONE_WRITE при вызове (см. README).",
+  "defaultProvider": "zai-glm",
+  "defaultModel": "glm-5.3-flash",
+  "defaultThinkingLevel": "off",
+  "defaultTools": ["read", "bash", "edit", "write"],
+  "sessionDir": "~/.pi/agent/sessions/qa-case-author",
+  "extensions": ["~/.pi/agent/extensions/zone-guard.ts"],
+  "quietStartup": true,
+  "compaction": {
+    "enabled": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2
+  }
+}

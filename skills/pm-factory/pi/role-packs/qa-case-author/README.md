@@ -19,8 +19,11 @@ zone-guard НЕ входит в пак: используется установ�
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-test-model/new/**
+манифест (glob-форма):       test-model/new/**
+env PI_ZONE_WRITE (префикс): test-model/new
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Только новые кейсы: `test-model/new/<change-id>/TC-<domain>-NNN.md` —
 **1 кейс = 1 файл** (ревьюер грузит кейсы по одному, доработки — точечным
@@ -42,7 +45,7 @@ cp skills/pm-factory/pi/role-packs/qa-case-author/settings.example.json ~/.pi/ag
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='test-model/new/**' \
+PI_ZONE_WRITE='test-model/new' \
 pi --provider zai-glm --model glm-5.3-flash --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, пути спеки (openspec/changes/C123/specs/) и sdd.md. Развернуть каждый Scenario в TC-*.md в test-model/new/C123/, трассировка обязательна. Отчет: список TC-ID → Scenario>"

@@ -19,8 +19,11 @@ zone-guard НЕ входит в пак: используется установ�
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-design/**
+манифест (glob-форма):       design/**
+env PI_ZONE_WRITE (префикс): design
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Мокапы (standalone HTML), `design/tokens.html` (единый источник токенов,
 J47), README-секция design. Продукт-код (`backend/`, `frontend/`),
@@ -41,7 +44,7 @@ cp skills/pm-factory/pi/role-packs/ui-designer/settings.example.json ~/.pi/agent
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='design/**' \
+PI_ZONE_WRITE='design' \
 pi --provider zai-glm --model glm-5.3-flash --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, спека (Requirements/Scenarios к визуализации), какие экраны/состояния, формат выбора (2–3 варианта). Мокапы в design/ + design/tokens.html. Отчет: пути, покрытые Scenario, ≤3 решений на внимание Заказчика>"

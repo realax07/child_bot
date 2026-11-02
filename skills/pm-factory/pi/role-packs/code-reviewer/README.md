@@ -19,8 +19,11 @@ zone-guard НЕ входит в пак: используется установ�
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-test-model/reviews/**
+манифест (glob-форма):       test-model/reviews/**
+env PI_ZONE_WRITE (префикс): test-model/reviews
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Только review-файлы (`test-model/reviews/<change-id>/review-*.md`). Код,
 tasks.md, спеки, тесты — вне зон, zone-guard отклоняет запись (`{block: true}`),
@@ -46,7 +49,7 @@ cp skills/pm-factory/pi/role-packs/code-reviewer/settings.example.json ~/.pi/age
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='test-model/reviews/**' \
+PI_ZONE_WRITE='test-model/reviews' \
 pi --provider zai-glm --model glm-5.3-flash --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: задача N tasks.md change C123, дифф/файлы, пути спеки/sdd, отчет dev. Review-файл: test-model/reviews/C123/review-<задача>-001.md с маркером «Одобрить»/«Вернуть»>"

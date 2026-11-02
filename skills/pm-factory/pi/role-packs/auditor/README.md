@@ -8,7 +8,10 @@
    `https://api.kimi.com/coding/v1` (Kimi For Coding), модель `k3.1-pro`
    (262k ctx; `k3.1-pro-highspeed`/1M требует высший тариф), ключ — chmod 600.
 2. role-agents.md → корень клона как `AGENTS.md` (Pi подхватывает безусловно).
-3. settings.example.json — справочный; при вызове роль задается флагами.
+3. settings.example.json — справочный, структура единая по всем пакам (J62:
+   `zai-glm`/`glm-5.3-flash`, zone-guard); при вызове роль задается флагами —
+   большой аудит переопределяет провайдера/модель/ro-guard в CLI
+   (`--provider kimi --model k3.1-pro -e …/auditor-readonly.ts`).
 
 ## Вызов (не меняя settings regress-runner)
 ```bash

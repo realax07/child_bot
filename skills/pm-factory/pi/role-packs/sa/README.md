@@ -21,12 +21,15 @@ Hermes/ПМ.
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-openspec/changes/<change-id>/**:sdd.md
+манифест (glob-форма):       openspec/changes/<change-id>/**:sdd.md
+env PI_ZONE_WRITE (префикс): openspec/changes/<change-id>:sdd.md
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Вызывающий подставляет реальный change-id вместо `<change-id>` (или правит env
 под конкретный пакет): например
-`PI_ZONE_WRITE='openspec/changes/C123/**:sdd.md'`. Все остальное — отказ
+`PI_ZONE_WRITE='openspec/changes/C123:sdd.md'`. Все остальное — отказ
 zone-guard (`{ block: true }` на `write`/`edit`); `git push` блокируется.
 
 ## Сборка на хосте
@@ -47,7 +50,7 @@ cp skills/pm-factory/pi/role-packs/sa/settings.example.json ~/.pi/agent/settings
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='openspec/changes/C123/**:sdd.md' \
+PI_ZONE_WRITE='openspec/changes/C123:sdd.md' \
 pi --provider zai-glm --model glm-5.3 --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, путь requirements.md, задача пакета. Артефакты — в openspec/changes/C123/ и sdd.md>"

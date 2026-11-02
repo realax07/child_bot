@@ -1,17 +1,18 @@
 {
   "$schema": "https://pi.dev/schemas/settings.schema.json",
-  "//": "Аудитор: ручной вызов ПМ (вне конвейера/флоу). Ключ kimi — в ~/.pi/agent/models.json (600).",
-  "defaultProvider": "kimi",
-  "defaultModel": "k3.1-pro",
+  "//": "Аудитор: ручной вызов ПМ (вне конвейера/флоу). Структура — единая по всем пакам (J62); для большого аудита провайдер/модель/ro-guard переопределяются флагами CLI при вызове (kimi/k3.1-pro, extensions/auditor-readonly.ts — см. README). Ключ — в ~/.pi/agent/models.json (600). Секретов в файле нет.",
+  "defaultProvider": "zai-glm",
+  "defaultModel": "glm-5.3-flash",
   "defaultThinkingLevel": "off",
   "defaultTools": [
     "read",
     "bash",
-    "grep"
+    "edit",
+    "write"
   ],
   "sessionDir": "~/.pi/agent/sessions/auditor",
   "extensions": [
-    "~/.pi/agent/extensions/auditor-readonly.ts"
+    "~/.pi/agent/extensions/zone-guard.ts"
   ],
   "quietStartup": true,
   "compaction": {

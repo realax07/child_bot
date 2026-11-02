@@ -19,8 +19,11 @@ zone-guard НЕ входит в пак: используется установ�
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-test-model/impact/**
+манифест (glob-форма):       test-model/impact/**
+env PI_ZONE_WRITE (префикс): test-model/impact
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Ровно один файл отчета: `test-model/impact/<change-id>.md` (таблица
 тест → дельта → вердикт keep/revalidate/retire + новые тестовые требования +
@@ -41,7 +44,7 @@ cp skills/pm-factory/pi/role-packs/qa-impact-analyst/settings.example.json ~/.pi
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='test-model/impact/**' \
+PI_ZONE_WRITE='test-model/impact' \
 pi --provider zai-glm --model glm-5.3-flash --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, дельты openspec/changes/C123/specs/, манифест test-model/regression/manifest.md. Вердикты keep/revalidate/retire по каждому затронутому тесту + новые тестовые требования + средовые требования → test-model/impact/C123.md>"

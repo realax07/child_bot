@@ -71,6 +71,18 @@ pipeline:
     раннера после ПМ-действий докатывает пакет: hermes-шаг помечен в state
     статусом `waited` и пропускается (раннер факт ПМ-работы не проверяет —
     запускай повтор, когда ПМ-шаг реально сделан).
+- `optional: true` (опциональные стадии, «шаги могут быть опциональными,
+  типа дизайнера») — только для pi/gate-стадий: отказ НЕ останавливает
+  пакет. Gate fail / verdict fail / pi fail / таймаут → стадия помечается
+  в state статусом **`skipped`**, в журнал плана и stderr пишется
+  **WARNING**, раннер идет дальше (при pi-успехе — обычный проход, включая
+  gate/verdict). Обязательные стадии (без `optional`) — STOP как раньше.
+  На resume skipped-стадии не переисполняются (аналог done/waited —
+  ретраев нет). У stand/hermes ключ не действует: молчаливый пропуск
+  stand-стадии только переносит гарантированный отказ глубже (env стенда
+  нужен следующим стадиям), hermes — ручная точка ПМ. Типовое применение —
+  design/design_check (задачи без фронт-дельты) и deploy (боевой деплой —
+  вне автомата).
 - Последовательность v0 — строгая, без параллелей; `depends[]`
   игнорируется с WARNING, если нарушает порядок.
 - `gate` (опциональное поле pi-шага) — команда-проверка в worktree после
@@ -101,13 +113,33 @@ pipeline:
   прогона. После каждого stage — строка в секцию «## Журнал раннера»
   плана.
 
+### Опциональные стадии (`optional: true`)
+
+Комментарий Заказчика: «шаги могут быть опциональными, типа дизайнера».
+Ключ стадии `optional: true` — семантика для pi/gate-стадий:
+
+| Отказ | Обязательная (по умолчанию) | `optional: true` |
+|---|---|---|
+| gate fail / gate-таймаут | STOP exit 2 | `skipped` + WARNING, дальше |
+| pi fail / pi-таймаут | STOP exit 2 | `skipped` + WARNING, дальше |
+| verdict fail (нет маркера) | STOP «ЖДУ ПМ: возврат ревью» | `skipped` + WARNING, дальше |
+| pi + gate ok, verdict ok | `done` | `done` (обычный проход) |
+
+- `skipped` пишется в state; в «Журнал раннера» плана — строка с WARNING;
+  в лог `<план>.runner.log` — статус SKIPPED с хвостами stdout/stderr.
+- resume: skipped-стадии НЕ переисполняются (аналог done/waited, ретраев нет).
+- stand/hermes ключ игнорируют: stand без env стенда роняет следующие стадии
+  (молчаливый пропуск только переносит отказ глубже), hermes — ручная точка.
+
 ## Полный пример манифеста Флоу 1 (требования → релиз)
 
 Скелет конвейера Флоу 1 для пакета `my-package`: требования → approve →
-создание change → архитектурное ревью → dev → код-ревью → QA-кейсы →
-ревью кейсов → автоматизация → impact-анализ → регресс → архивация →
-релиз. Стадии `hermes:` — ручные стоп-точки ПМ (диспатч делегаций, приемка,
-push, merge); раннер их «докатывает» при повторном запуске после ПМ-действий.
+создание change → архитектурное ревью → design/design_check (опциональные)
+→ dev → код-ревью → QA-кейсы → ревью кейсов → автоматизация →
+impact-анализ → регресс → архивация → релиз → deploy (опциональная,
+релизная инфра). Стадии `hermes:` — ручные стоп-точки ПМ (диспатч
+делегаций, приемка, push, merge); раннер их «докатывает» при повторном
+запуске после ПМ-действий.
 
 ````markdown
 # PLAN-my-package: <название пакета>
@@ -129,14 +161,31 @@ pipeline:
                               # Заказчику и вносит правки; repeat раннера —
                               # когда требования утверждены
     - id: create_change
-      run: hermes:pm          # СТОП-ТОЧКА: ПМ создает openspec/changes/
-                              # my-package/ (proposal/spec/design) и
-                              # валидирует openspec
+      run: pi:sa              # СА пишет proposal/spec/design/tasks (зоны
+      zones: [openspec/changes/my-package/**, sdd.md]   # openspec + sdd)
+      inputs: [requirements.md, docs/ba/answers_round1.md]
+      gate: openspec validate --strict
     - id: arch_review
       run: pi:architect
-      zones: [architecture/**, docs/**]
+      zones: [test-model/reviews/**, architecture/**, docs/**]
       inputs: [openspec/changes/my-package/proposal.md,
                openspec/changes/my-package/design.md]
+      verdict:
+        file: test-model/reviews/my-package/arch-review-001.md
+        contains: "Одобрить"
+    - id: design              # дизайн-макеты/токены ДО кода (J36); опциональна:
+      run: pi:ui-designer     # задачи без фронт-дельты — падение → skipped,
+      zones: [design/**]      # пакет едет дальше (не STOP)
+      inputs: [openspec/changes/my-package/design.md]
+      optional: true
+    - id: design_check
+      run: pi:design-validator
+      zones: [test-model/reviews/**]
+      inputs: [design/]
+      verdict:
+        file: test-model/reviews/my-package/design-check-001.md
+        contains: "Одобрить"
+      optional: true          # отказ вердикта → skipped, не STOP
     - id: dev
       run: pi:dev
       zones: [backend/**, frontend/**, services/**, src/**, tests/**]
@@ -186,6 +235,13 @@ pipeline:
     - id: release
       run: hermes:pm          # СТОП-ТОЧКА: ПМ merge PR после зеленого CI,
                               # тег релиза, архивация change-пакета
+    - id: deploy              # релизная инфра (devops, J62-остаток): runbook,
+      run: pi:devops          # деплой-скрипты (бэкап/EXPECTED_COMMIT/смоук/
+      zones: [deploy/**, docs/ops/**]       # DRY_RUN), миграции — в worktree.
+      optional: true          # БОЕВОЙ деплой прод-стека — только по
+                              # утверждению ПМ (hermes-стоп), накатку
+                              # выполняет Заказчик; падение стадии →
+                              # skipped + WARNING, пакет едет дальше
 ```
 ````
 
@@ -194,8 +250,18 @@ pipeline:
 - `approve` — единственная точка воли Заказчика: утверждение требований.
   Раннер останавливается со статусом `waited`; повторный запуск — когда ПМ
   зафиксировал утвержденную спеку.
-- `create_change` — механика OpenSpec (proposal/spec/design + валидация)
-  остается за ПМ: v0 раннера не создает спеки сам.
+- `create_change` — pi:sa пишет change-пакет (зоны openspec + sdd), strict-валидация
+  как gate; arch_review — pi:architect с вердикт-воротами «Одобрить».
+- `design`/`design_check` — мокапы ДО кода и их валидация (J36), обе стадии
+  `optional: true`: падение/отказ вердикта → skipped + WARNING, пакет едет
+  дальше; задачи без фронт-дельты — стадии можно удалить (или отметка
+  design-not-required).
+- `deploy` — pi:devops (J62-остаток), `optional: true`: подготовка релизной
+  инфры в worktree (runbook, деплой-скрипты, миграции, чек-листы). БОЕВОЙ
+  деплой прод-стека — только по утверждению ПМ (hermes-стоп); живой прод
+  devops читает, реальные накатки выполняет Заказчик.
+- Эскалация `pi:debug` (СРЕДА/КОД/ТЕСТ) — НЕ стадия: ПМ запускает при застревании
+  dev/qa-стадии параллельно источнику (J35).
 - `archive`/`release` — ручные: приемка артефактов, push, PR/merge, тег.
   Раннер факт ПМ-работы не проверяет — repeat запускается, когда шаг
   реально сделан (иначе — повторное «ЖДУ ПМ» без вреда: стадия уже `waited`).

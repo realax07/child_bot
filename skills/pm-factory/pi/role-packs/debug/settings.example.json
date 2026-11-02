@@ -4,9 +4,14 @@
   "defaultProvider": "zai-glm",
   "defaultModel": "glm-5.3-flash",
   "defaultThinkingLevel": "off",
-  "defaultTools": ["read", "bash", "edit", "write"],
+  "defaultTools": [
+    "read",
+    "bash"
+  ],
   "sessionDir": "~/.pi/agent/sessions/debug",
-  "extensions": ["~/.pi/agent/extensions/zone-guard.ts"],
+  "extensions": [
+    "~/.pi/agent/extensions/zone-guard.ts"
+  ],
   "quietStartup": true,
   "compaction": {
     "enabled": true

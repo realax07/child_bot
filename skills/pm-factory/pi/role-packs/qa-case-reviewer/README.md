@@ -19,20 +19,17 @@ zone-guard НЕ входит в пак: используется установ�
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-test-model/reviews/**
+манифест (glob-форма):       test-model/reviews/**:test-model/approved/**
+env PI_ZONE_WRITE (префикс): test-model/reviews:test-model/approved
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Review-файлы, **append-only партиии**: итерации нумеруются сквозно по пакету
 (`test-model/reviews/<change-id>/review-NNN.md`), история не удаляется.
 При вердикте «Одобрить» ревьюер переносит файлы партии в
-`test-model/approved/<change-id>/` — для этого прогона вызывающий добавляет
-зону:
-
-```
-PI_ZONE_WRITE='test-model/reviews/**:test-model/approved/**'
-```
-
-(без переноса — только `test-model/reviews/**`). Кейсы в `new/` ревьюер не
+`test-model/approved/<change-id>/` — зона `test-model/approved/**` входит в
+дефолт пака (вторая строка блока выше). Кейсы в `new/` ревьюер не
 правит; `git push` блокируется. **Маркер «Одобрить» в вердикте обязателен**:
 `## Вердикт: Одобрить` / `## Вердикт: Вернуть` — вердикт-ворота раннера
 (`stage.verdict`) ищут «Одобрить» в файле, нет маркера → STOP
@@ -52,7 +49,7 @@ cp skills/pm-factory/pi/role-packs/qa-case-reviewer/settings.example.json ~/.pi/
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='test-model/reviews/**:test-model/approved/**' \
+PI_ZONE_WRITE='test-model/reviews:test-model/approved' \
 pi --provider zai-glm --model glm-5.3-flash --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, партия: список файлов test-model/new/C123/TC-*.md. Ревью файл-за-файлом, review-файл test-model/reviews/C123/review-NNN.md с маркером «Одобрить»/«Вернуть»; при «Одобрить» — перенос партии в test-model/approved/C123/>"

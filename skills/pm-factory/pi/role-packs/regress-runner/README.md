@@ -18,8 +18,9 @@
 Перехват `tool_call` в событийной модели Pi (формат — `export default function (pi: ExtensionAPI)`, TS без компиляции, грузит jiti):
 
 1. **`write`/`edit`** — запись только в зонах относительно cwd сессии:
-   `test-model/regress/**` и `tests/**` (переопределяется `PI_ZONE_WRITE="зона1:зона2"`).
-   Все остальное — отказ с вежливой причиной.
+   `test-model/regress/**` и `tests/**` (переопределяется
+   `PI_ZONE_WRITE="зона1:зона2"`, префикс-форма — runner прокидывает зоны
+   манифеста нормализованными, J61). Все остальное — отказ с вежливой причиной.
 2. **`bash`** — запрет `git push` (пушит ПМ после приемки артефакта).
 3. **`bash`** — docker только на чтение (`ps/inspect/logs/images/version/info/stats/top`);
    мутации (`run/exec/rm/stop/build/compose up…`, `system prune` и т.п.) — отказ.

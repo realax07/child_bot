@@ -66,6 +66,17 @@ resume докатывает пакет с тем же env стенда.
 не найдено → STOP «ЖДУ ПМ: возврат ревью» (exit 2, stage stopped, при
 повторе стадия переисполняется — как gate-отказ, ретраев нет).
 
+Опциональные стадии (J62-остаток, «шаги могут быть опциональными, типа
+дизайнера»): ключ стадии `optional: true` — для pi/gate-стадий отказ НЕ
+останавливает пакет: gate fail / verdict fail / pi fail / таймаут → стадия
+помечается в state статусом `skipped`, в журнал плана и stderr пишется
+WARNING, runner идет дальше (при pi-успехе — обычный проход, включая
+gate/verdict). Обязательные стадии (без optional) — STOP как раньше.
+У stand/hermes ключ не действует: молчаливый пропуск stand-стадии только
+переносит гарантированный отказ глубже (env стенда нужен следующим
+стадиям), hermes — ручная точка ПМ. На resume skipped-стадии не
+переисполняются (аналог done/waited — ретраев нет).
+
 Вывод стадий не теряется: хвост stdout/stderr каждой стадии (≤50 строк)
 сохраняется в state (stdout_tail/stderr_tail) и в лог <план>.runner.log.
 
@@ -300,7 +311,7 @@ def extract_pipeline(text: str) -> dict:
 def parse_manifest(plan_path: Path) -> dict:
     """Валидирует манифест плана. Возвращает нормализованный dict:
     {package, flow, stages: [{id, kind, payload, zones, inputs, task,
-    description, gate, depends, verdict}]}. Ошибки — ManifestError
+    description, gate, depends, verdict, optional}]}. Ошибки — ManifestError
     (без side effects)."""
     try:
         text = plan_path.read_text(encoding="utf-8")
@@ -383,6 +394,13 @@ def parse_manifest(plan_path: Path) -> dict:
                     raise ManifestError(
                         f"{where}.verdict.{field} обязателен "
                         "(непустая строка)")
+        optional = raw.get("optional")
+        if optional is not None and not isinstance(optional, bool):
+            # Опциональная стадия (J62-остаток): отказ pi/gate/verdict —
+            # skipped + WARNING, пакет едет дальше (не STOP).
+            raise ManifestError(
+                f"{where}.optional: ожидается true/false, "
+                f"получено: {optional!r}")
         stage = {
             "id": sid,
             "kind": kind,
@@ -396,6 +414,7 @@ def parse_manifest(plan_path: Path) -> dict:
             "verdict": ({"file": verdict["file"].strip(),
                          "contains": verdict["contains"].strip()}
                         if isinstance(verdict, dict) else None),
+            "optional": bool(optional),
         }
         stages.append(stage)
     return {"package": package, "flow": flow, "stages": stages}
@@ -722,6 +741,36 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             print(tail(stderr), file=sys.stderr)
         return EXIT_STOP
 
+    def _skip(stage: dict, detail: str, exit_code: int | None = None,
+              stdout: str = "", stderr: str = "") -> int:
+        """Опциональная стадия упала (J62-остаток): НЕ STOP — статус
+        `skipped`, WARNING в журнал плана и stderr, пакет едет дальше."""
+        state_record(state, stage["id"], "skipped",
+                     f"optional: {detail}", exit_code, stdout, stderr)
+        try:
+            state_write(spath, state)
+            try:
+                log_append(plan_path, stage, "SKIPPED", stdout, stderr)
+            except OSError:
+                pass
+            journal_append(plan_path, f"{utcnow_iso()} | WARNING | stage "
+                           f"{stage['id']} | {stage['kind']}:"
+                           f"{stage['payload']} | SKIPPED (optional: "
+                           f"{detail})")
+        except OSError:
+            pass  # план удален/readonly — диагностика важнее state
+        print(f"RUNNER-WARNING: stage {stage['id']} помечен skipped "
+              f"(optional: true) — {detail}; пакет едет дальше",
+              file=sys.stderr)
+        return 0
+
+    def _fail(stage: dict, detail: str, exit_code: int | None,
+              stdout: str = "", stderr: str = "") -> int:
+        """Отказ стадии: optional → skipped+WARNING (не STOP), иначе STOP."""
+        if stage.get("optional"):
+            return _skip(stage, detail, exit_code, stdout, stderr)
+        return _stop(stage, detail, exit_code, stdout, stderr)
+
     try:
         state = state_load(spath) or {
             "plan": str(plan_path), "package": manifest["package"],
@@ -745,7 +794,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
     # прогона — файл «не теряется» после прогона на реальном репо.
     print(f"RUNNER: state: {spath}")
     done = {sid for sid, rec in state.get("stages", {}).items()
-            if rec.get("status") in ("done", "waited")}
+            if rec.get("status") in ("done", "waited", "skipped")}
     # Env стенда stand-стадий пакета (J62): живет в state — resume докатывает
     # пакет с тем же env (stand-стадия не переисполняется, она done).
     stand_env: dict[str, str] = dict(state.get("stand_env") or {})
@@ -794,12 +843,16 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 rc, out, err = run_shell(stage["payload"], worktree, timeout,
                                          stand_env=stand_env)
             except subprocess.TimeoutExpired as exc:
-                return _stop(stage, f"таймаут gate ({timeout}с)", None,
-                             timeout_stream(exc.stdout),
-                             timeout_stream(exc.stderr))
+                if _fail(stage, f"таймаут gate ({timeout}с)", None,
+                         timeout_stream(exc.stdout),
+                         timeout_stream(exc.stderr)):
+                    return EXIT_STOP
+                continue
             if rc != 0:
-                # Воротный отказ НЕ ретраится — разбор ПМ.
-                return _stop(stage, f"gate exit {rc}", rc, out, err)
+                # Воротный отказ НЕ ретраится — разбор ПМ (optional — skip).
+                if _fail(stage, f"gate exit {rc}", rc, out, err):
+                    return EXIT_STOP
+                continue
             state_record(state, stage["id"], "done", "gate ok", 0, out, err)
             state_write(spath, state)
             try:
@@ -811,9 +864,9 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             done.add(stage["id"])
             if stage["verdict"]:
                 problem = check_verdict(worktree, stage["verdict"])
-                if problem:
-                    return _stop(stage,
-                                 f"{problem} — ЖДУ ПМ: возврат ревью", None)
+                if problem and _fail(
+                        stage, f"{problem} — ЖДУ ПМ: возврат ревью", None):
+                    return EXIT_STOP
             continue
 
         if stage["kind"] == "stand":
@@ -887,21 +940,29 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         try:
             rc, out, err = run_pi(args, worktree, env, timeout)
         except subprocess.TimeoutExpired as exc:
-            return _stop(stage, f"таймаут pi ({timeout}с)", None,
-                         timeout_stream(exc.stdout),
-                         timeout_stream(exc.stderr))
+            if _fail(stage, f"таймаут pi ({timeout}с)", None,
+                     timeout_stream(exc.stdout),
+                     timeout_stream(exc.stderr)):
+                return EXIT_STOP
+            continue
         if rc != 0:
-            return _stop(stage, f"pi exit {rc}", rc, out, err)
+            if _fail(stage, f"pi exit {rc}", rc, out, err):
+                return EXIT_STOP
+            continue
         # Опциональный gate-этап стадии (после успешного pi; отказ — STOP).
         if stage["gate"]:
             try:
                 grc, gout, gerr = run_shell(stage["gate"], worktree, timeout)
             except subprocess.TimeoutExpired as exc:
-                return _stop(stage, f"таймаут gate stage ({timeout}с)", None,
-                             timeout_stream(exc.stdout),
-                             timeout_stream(exc.stderr))
+                if _fail(stage, f"таймаут gate stage ({timeout}с)", None,
+                         timeout_stream(exc.stdout),
+                         timeout_stream(exc.stderr)):
+                    return EXIT_STOP
+                continue
             if grc != 0:
-                return _stop(stage, f"gate stage exit {grc}", grc, gout, gerr)
+                if _fail(stage, f"gate stage exit {grc}", grc, gout, gerr):
+                    return EXIT_STOP
+                continue
             out += f"\n--- gate ---\n{gout}"
             err += f"\n--- gate ---\n{gerr}"
         state_record(state, stage["id"], "done", "pi ok", 0, out, err)
@@ -917,9 +978,9 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         # вердикта обязан содержать маркер («Одобрить»), иначе STOP.
         if stage["verdict"]:
             problem = check_verdict(worktree, stage["verdict"])
-            if problem:
-                return _stop(stage, f"{problem} — ЖДУ ПМ: возврат ревью",
-                             None)
+            if problem and _fail(
+                    stage, f"{problem} — ЖДУ ПМ: возврат ревью", None):
+                return EXIT_STOP
 
     print(f"RUNNER: пакет {manifest['package']} докатан "
           f"({len(manifest['stages'])} stage); state: {spath}")

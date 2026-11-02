@@ -21,8 +21,11 @@ Hermes/ПМ.
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-requirements.md:docs/ba/**
+манифест (glob-форма):       requirements.md:docs/ba/**
+env PI_ZONE_WRITE (префикс): requirements.md:docs/ba
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Только два артефакта роли. Черновики — в диалоге; запись в репозиторий —
 только согласованные версии (черновик → подтверждение Заказчика → запись).
@@ -48,7 +51,7 @@ cp skills/pm-factory/pi/role-packs/ba/settings.example.json ~/.pi/agent/settings
 
 ```bash
 cd <клон> && \
-PI_ZONE_WRITE='requirements.md:docs/ba/**' \
+PI_ZONE_WRITE='requirements.md:docs/ba' \
 pi --provider zai-glm --model glm-5.3 --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: раунд вопросов N по requirements.md, ответы Заказчика дословно (дата, цитаты) → docs/ba/answers_roundN.md, изменения → requirements.md>"

@@ -21,15 +21,16 @@ Hermes/ПМ.
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-architecture/**:docs/**
+манифест (glob-форма):       architecture/**:docs/**:test-model/reviews/**
+env PI_ZONE_WRITE (префикс): architecture:docs:test-model/reviews
 ```
 
-Карта, ADR и проектная документация. Если бриф требует положить review-файл
-вне этих зон (например `test-model/reviews/<change-id>/review-NNN-architecture.md`),
-вызывающий ДОБАВЛЯЕТ путь в env под конкретный пакет:
-`PI_ZONE_WRITE='architecture/**:docs/**:test-model/reviews/C123/**'`. Все
-остальное — отказ zone-guard (`{ block: true }` на `write`/`edit`); `git push`
-блокируется.
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
+
+Карта, ADR и проектная документация, review-файлы архитектурных ревью
+(`test-model/reviews/<change-id>/review-*-architecture.md`) — все три зоны в
+дефолте пака. Все остальное — отказ zone-guard (`{ block: true }` на
+`write`/`edit`); `git push` блокируется.
 
 ## Сборка на хосте
 
@@ -49,7 +50,7 @@ cp skills/pm-factory/pi/role-packs/architect/settings.example.json ~/.pi/agent/s
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='architecture/**:docs/**:test-model/reviews/C123/**' \
+PI_ZONE_WRITE='architecture:docs:test-model/reviews/C123' \
 pi --provider zai-glm --model glm-5.3 --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: change C123, пути proposal/specs/design/tasks. Вердикт approve/return — в review-файле, строка «Карта: …» обязательна>"

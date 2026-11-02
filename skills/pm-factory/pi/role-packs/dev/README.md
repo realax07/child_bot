@@ -21,8 +21,11 @@ Hermes/ПМ.
 ## Зона записи (PI_ZONE_WRITE)
 
 ```
-backend/**:frontend/**:services/**:src/**:tests/**:e2e/**
+манифест (glob-форма):       backend/**:frontend/**:services/**:src/**:tests/**:e2e/**
+env PI_ZONE_WRITE (префикс): backend:frontend:services:src:tests:e2e
 ```
+
+Обе строки задают ОДНУ зону: runner нормализует glob-хвосты зон манифеста в префикс-форму guard'а (`normalize_zone`, J61 — guard матчит зоны префиксом, не glob'ом). В env `PI_ZONE_WRITE` — префикс-форма (то, что прокидывает runner); в манифесте пакета (`stage.zones`) — glob-форма, как в гайде docs/guides/pipeline-manifest.md.
 
 Продуктовое дерево (код, тесты). `requirements.md`, спеки
 (`openspec/**/spec.md`, design.md, proposal.md), `test-model/`, `scripts/**` —
@@ -51,7 +54,7 @@ cp skills/pm-factory/pi/role-packs/dev/settings.example.json ~/.pi/agent/setting
 
 ```bash
 cd /tmp/wt-<change> && \
-PI_ZONE_WRITE='backend/**:frontend/**:services/**:src/**:tests/**:e2e/**' \
+PI_ZONE_WRITE='backend:frontend:services:src:tests:e2e' \
 pi --provider zai-glm --model glm-5.3 --no-session \
    -e ~/.pi/agent/extensions/zone-guard.ts \
    -p "<бриф: задача 2.3 tasks.md change C123, ветка feature/C123-03, пути спеки/sdd. Отчет: реализовано, проверенные Scenario, вопросы>"

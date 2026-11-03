@@ -517,8 +517,7 @@ class TestSmokeRecommendation:
         assert plan[0].chat_id == TELEGRAM_ID
         assert plan[0].run_at_utc == NIGHT_FIRE_UTC
         assert plan[0].text == (
-            "⏰ Пора готовиться ко сну. Суммарное бодрствование: "
-            "5 ч 35 мин. Целевое время ухода: 22:00, крайнее — 22:30."
+            "⏰ Пора готовиться ко сну. Суммарное бодрствование: 5 ч 35 мин."
         )
 
     def test_tc_smoke2_002_key_texts_match_spec_verbatim(self):
@@ -540,7 +539,7 @@ class TestSmokeRecommendation:
             texts.reminder_minutes_line(15), "13:20", "14:00", "5 ч 05 мин"
         ) == _spec_section("7.23")
         assert texts.reminder_night_text(
-            "12 ч 05 мин", "22:00", "22:30"
+            "12 ч 05 мин"
         ) == _spec_section("7.24")
         # Кнопки ТЗ §6 дословно (входы сценария).
         assert BTN_SLEEP == "😴 Заснул"

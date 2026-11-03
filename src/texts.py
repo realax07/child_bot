@@ -489,18 +489,11 @@ def reminder_nap_text(
     )
 
 
-def reminder_night_text(
-    total_wake_line: str,
-    target_line: str,
-    deadline_line: str,
-) -> str:
-    """§7.24: «⏰ Пора готовиться ко сну. Суммарное бодрствование:
-    12 ч 05 мин. Целевое время ухода: 22:00, крайнее — 22:30.»"""
-    return (
-        f"⏰ Пора готовиться ко сну. Суммарное бодрствование: "
-        f"{total_wake_line}. Целевое время ухода: {target_line}, "
-        f"крайнее — {deadline_line}."
-    )
+def reminder_night_text(total_wake_line: str) -> str:
+    """§7.24 (ред. 01.11, решение продакта): «⏰ Пора готовиться ко сну.
+    Суммарное бодрствование: 12 ч 05 мин.» — без строки целевого/крайнего
+    времени: она конфликтовала с рекомендованным временем ухода (BUG-005)."""
+    return f"⏰ Пора готовиться ко сну. Суммарное бодрствование: {total_wake_line}."
 
 
 def undo_done_text(label: str, local_hhmm: str, leftover: str) -> str:

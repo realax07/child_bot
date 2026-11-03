@@ -227,8 +227,6 @@ def compute_push_plan(
                 run_at_utc=_to_utc(run_at, tz_name),
                 text=texts.reminder_night_text(
                     texts.reminder_duration_line(night.wake_total),  # §7.24
-                    f"{night.target:%H:%M}",
-                    f"{night.deadline:%H:%M}",
                 ),
             ))
     return plan

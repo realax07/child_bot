@@ -40,7 +40,9 @@ prepare/run/finish/status/reconcile — исполнение разрешенн�
   СУЗИТЬ. Запрос пути вне политики роли — отказ (ZONE_OUTSIDE_POLICY) с
   перечнем недопустимых путей; сужение прозрачно (в выводе — фактические
   суженные зоны и policy_version). finish сверяет diff ИМЕННО с суженной
-  (политико-валидной) зоной; реестр хранит policy_version для аудита.
+  (политико-валидной) зоной; реестр хранит policy_version для аудита и
+  role_zone_digest (J65.2) — отпечаток зоны своей роли, который finish
+  сверяет: изменилась зона своей роли — ZONE_POLICY_MISMATCH, чужой — нет.
 - Никакого авто-push/merge/deploy и авто-старта фаз: только исполнение
   разрешенного; этапные ворота Заказчика — check_action
   (HUMAN_APPROVAL_REQUIRED, контракт §10).
@@ -104,12 +106,14 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import flow_mode  # noqa: E402
+import flow_ids  # noqa: E402  (J65.3: грамматика scope)
 import flow_state  # noqa: E402
 import flow_transition as ft  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import pm_bounds_check as pmb  # noqa: E402  (Н14: J3-префиксы защищенных путей)
 import role_zone_policy as rzp  # noqa: E402
 import session_check as sc  # noqa: E402
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
 OUTPUT_SCHEMA = "flowctl-output/1"
 STATE_SCHEMA = "flowctl-state/1"
@@ -174,18 +178,9 @@ def ambiguous_field_hints(scope: dict) -> list[str]:
         return [f"flow={flow!r} вне допустимых 1–5 "
                 "(ожидается целое число 1–5)"]
     hints: list[str] = []
-    if flow in (2, 3) and not flow_state.BUG_ID_RE.match(change):
+    if not flow_ids.valid_scope(flow, change):
         hints.append(f"scope={change} не соответствует формату "
-                     f"Флоу {flow} (BUG-NNN, например BUG-042)")
-    elif flow == 1 and not flow_state.CHANGE_ID_RE.match(change):
-        hints.append(f"scope={change} не соответствует формату Флоу 1 "
-                     "(kebab-case change-id, например add-widget)")
-    elif flow == 4 and not flow_state.CHORE_RE.match(change):
-        hints.append(f"scope={change} не соответствует формату Флоу 4 "
-                     "([chore])")
-    elif flow == 5 and not flow_state.CHANGE_ID_RE.match(change):
-        hints.append(f"scope={change} не соответствует формату Флоу 5 "
-                     "(change-id)")
+                     f"Флоу {flow} ({flow_ids.SCOPE_HINTS[flow]})")
     return hints
 
 
@@ -301,7 +296,7 @@ def state_write_locked(path: Path, data: dict, mutate) -> None:
 
 def default_state_path(registry: str | None) -> Path:
     base = Path(registry) if registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json"
+        fp.registry_path()
     )
     return base.parent / "flowctl_state.json"
 
@@ -571,7 +566,7 @@ def cmd_prepare(args) -> int:
         print(f"FLOWCTL-ERROR: не git-репозиторий: {repo}", file=sys.stderr)
         return 2
     registry_path = Path(args.registry) if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     correlation = args.correlation_id or uuid.uuid4().hex
     delegation_id = f"deleg-{correlation[:16]}"
 
@@ -813,6 +808,7 @@ def cmd_prepare(args) -> int:
         "owner_pm": args.owner_pm,
         "paths": zones,
         "policy_version": policy_version,
+        "role_zone_digest": narrowed["role_zone_digest"],
         "worktree": worktree,
         "branch": derived_branch,
         "base_sha": _git_head(base_tree),
@@ -868,6 +864,7 @@ def cmd_prepare(args) -> int:
                         "owner_pm": args.owner_pm,
                         "paths": zones,
                         "policy_version": policy_version,
+                        "role_zone_digest": narrowed["role_zone_digest"],
                         "worktree": worktree,
                         "branch": derived_branch,
                         "base_sha": _git_head(base_tree),
@@ -1217,6 +1214,26 @@ def cmd_finish(args) -> int:
     worktree = Path(record["worktree"]) if record.get("worktree") else Path(
         record["scope"]["repo"])
 
+    # Резервация уже вне ZONE_HOLDING (closed/released — например,
+    # provisional-стадия, закрытая package_runner после коммита): повторный
+    # finish зону не переоткрывает — реестр — источник факта (контракт §13).
+    reg_data, reg_err = sc.registry_load(registry_path)
+    reg_session = None if reg_err else next(
+        (s for s in reg_data.get("sessions", [])
+         if isinstance(s, dict)
+         and s.get("delegation_id") == record.get("delegation_id")), None)
+    if reg_session is not None and reg_session.get("status") in (
+            "closed", "released"):
+        _emit({
+            "schema_version": OUTPUT_SCHEMA, "command": "finish",
+            "correlation_id": args.correlation_id, "verdict": "blocked",
+            "registry_status": reg_session.get("status"),
+            "note": f"резервация {record.get('delegation_id')} уже "
+                    f"{reg_session.get('status')!r} — finish не переоткрывает "
+                    "зону; новая работа — новый prepare",
+        }, args.as_json)
+        return 2
+
     # 0) P0.2: обязательные gates — из политики (DEFAULT_GATES точки запуска
     #    + машинные ворота этапа из STAGE_TABLE), НЕ из флагов. --gates может
     #    только ДОБАВИТЬ проверки; попытка заменить обязательный набор — отказ
@@ -1275,21 +1292,29 @@ def cmd_finish(args) -> int:
                     ((session or {}).get("zones")
                      or (session or {}).get("paths") or [])]
     stored_policy_version = (session or {}).get("policy_version")
+    stored_role_digest = (session or {}).get("role_zone_digest")
     # P0.3: зона резервации должна подтверждаться политикой роли —
     # сверяется именно суженная (политико-валидная) зона, а не исходная
-    # просьба --path; расхождение редакции политики — дефект аудита.
+    # просьба --path.
+    # J65.2: редакция сверяется по отпечатку зоны СВОЕЙ роли, а не по
+    # версии реестра целиком: правка зоны чужой роли (или описаний) не
+    # роняет активную сессию; любое изменение зоны своей роли — дефект.
+    # Легаси-резервация без отпечатка — только сверка покрытия ниже.
     current_policy = rzp.narrow_zones(record.get("actor_role"), stored_zones)
-    policy_stale = bool(stored_policy_version) and \
-        stored_policy_version != rzp.policy_version()
+    current_role_digest = rzp.role_zone_digest(record.get("actor_role"))
+    policy_stale = bool(stored_role_digest) and \
+        stored_role_digest != current_role_digest
     policy_invalid = bool(stored_zones) and (
         not current_policy["zones"] or current_policy["violations"])
     if policy_stale or policy_invalid:
         defects.append({
             "source": "zone", "code": "ZONE_POLICY_MISMATCH",
             "detail": "зона резервации не подтверждается текущей политикой "
-                      f"роли «{record.get('actor_role')}» (policy_version "
-                      f"резервации: {stored_policy_version or '—'}; текущая: "
-                      f"{rzp.policy_version()}; непокрытые запросы: "
+                      f"роли «{record.get('actor_role')}» (зона роли в "
+                      f"резервации: {stored_role_digest or '— (легаси)'}; "
+                      f"текущая: {current_role_digest}; policy_version "
+                      f"резервации: {stored_policy_version or '—'}; "
+                      f"непокрытые запросы: "
                       f"{', '.join(current_policy['violations']) or '—'}); "
                       "политика: " + rzp.POLICY_SOURCE,
         })
@@ -1463,6 +1488,7 @@ def cmd_finish(args) -> int:
                      "violations": zone_res.get("violations", []),
                      "zones": stored_zones,
                      "policy_version": stored_policy_version,
+                     "role_zone_digest": stored_role_digest,
                      "policy_confirmed": not (policy_stale or policy_invalid)},
             "gates": {"overall": gate_report["overall"],
                       "report_ref": gate_report.get("report_ref"),
@@ -1565,7 +1591,7 @@ def cmd_status(args) -> int:
     runs = [r for cid, r in sorted(state["runs"].items())
             if not args.correlation_id or cid == args.correlation_id]
     registry_path = Path(args.registry) if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     reg = sc.status(registry_path)
     _emit({
         "schema_version": OUTPUT_SCHEMA, "command": "status",
@@ -1586,7 +1612,7 @@ def cmd_status(args) -> int:
 
 def cmd_reconcile(args) -> int:
     registry_path = Path(args.registry) if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     state_path = Path(args.state) if args.state else default_state_path(
         args.registry)
     res = sc.reconcile(
@@ -1664,7 +1690,7 @@ def cmd_release(args) -> int:
         return 2
     reason = (args.reason or "").strip() or RELEASE_DEFAULT_REASON
     registry_path = Path(args.registry) if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     state_path = Path(args.state) if args.state else default_state_path(
         args.registry)
     state = state_load(state_path)
@@ -2407,7 +2433,7 @@ def cmd_integrate(args) -> int:
         print(f"FLOWCTL-ERROR: не git-репозиторий: {repo}", file=sys.stderr)
         return 2
     registry_path = Path(args.registry).expanduser() if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     data, err = sc.registry_load(registry_path)
     if err:
         # fail-closed: не умеем проверить отсутствие активных сессий —
@@ -2802,7 +2828,7 @@ def gc_plan(args) -> dict:
 
     # 2) Worktrees: done/closed-сессии реестра → снос; остальные — список.
     registry_path = Path(args.registry).expanduser() if args.registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json")
+        fp.registry_path())
     remove_wt: list[dict] = []
     list_only: list[dict] = []
     wt_note = ""

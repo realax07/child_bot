@@ -1,0 +1,333 @@
+{
+  "schema": "roles/1",
+  "comment": "Единый реестр ролей (J65.1): зоны записи (политика ворот), строки таблицы зон agents/README.md и оглавление роль-паков генерируются из этого файла (scripts/gen_role_docs.py). Правка зон — только здесь. <id> в зоне — сегмент change-id пакета (для ворот — '*', раннер подставляет id пакета); '*' — обычная маска glob.",
+  "roles": [
+    {
+      "id": "ba",
+      "title": "Бизнес-аналитик",
+      "mode": "plan-write",
+      "zone_text": "`requirements.md`, `docs/ba/answers_roundN.md`",
+      "push": "нет",
+      "zones": [
+        "requirements.md",
+        "docs/ba/*"
+      ],
+      "pack": "ba",
+      "prompt": "agents/ba_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "sa",
+      "title": "Системный аналитик",
+      "mode": "auto-edit",
+      "zone_text": "`openspec/changes/<id>/**` (вкл. requirements.md, research.md — решение 2026-10-05 ekotov-wiki), `sdd.md`",
+      "push": "нет",
+      "zones": [
+        "openspec/changes/<id>/proposal.md",
+        "openspec/changes/<id>/requirements.md",
+        "openspec/changes/<id>/research.md",
+        "openspec/changes/<id>/specs/**",
+        "openspec/changes/<id>/design.md",
+        "openspec/changes/<id>/tasks.md",
+        "openspec/changes/<id>/impact.md",
+        "sdd.md"
+      ],
+      "pack": "sa",
+      "prompt": "agents/sa_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "dev",
+      "title": "Разработчик",
+      "mode": "auto-edit",
+      "zone_text": "файлы своей задачи, чекбокс в `tasks.md`, своя ветка `feature/*`; unit-тесты — только `tests/unit/**` (J66); код фабрики — `scripts/**`, `plugins/**` (J64.18)",
+      "push": "своей ветки — да; main — нет",
+      "zones": [
+        "openspec/changes/<id>/tasks.md",
+        "backend/**",
+        "frontend/**",
+        "services/**",
+        "scripts/**",
+        "contracts/**",
+        "deploy/**",
+        "src/**",
+        "tests/unit/**",
+        "test-model/bugs/*",
+        "feature/*",
+        "plugins/**"
+      ],
+      "pack": "dev",
+      "prompt": "agents/dev_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "code_reviewer",
+      "title": "Код-ревьюер",
+      "mode": "auto-edit",
+      "zone_text": "`code-reviews/<change-id>/review-*.md`",
+      "push": "нет",
+      "zones": [
+        "code-reviews/<id>/review-*.md"
+      ],
+      "pack": "code-reviewer",
+      "prompt": "agents/code_reviewer_agent.md",
+      "in_table": true,
+      "pack_note": "вердикт — заголовком `## Вердикт: approve|return` (J65.4)"
+    },
+    {
+      "id": "qa_case_author",
+      "title": "QA: автор кейсов",
+      "mode": "auto-edit",
+      "zone_text": "`test-model/new/<change-id>/`",
+      "push": "нет",
+      "zones": [
+        "test-model/new/<id>/**"
+      ],
+      "pack": "qa-case-author",
+      "prompt": "agents/qa_case_author_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "qa_case_reviewer",
+      "title": "QA: ревьюер кейсов",
+      "mode": "auto-edit",
+      "zone_text": "`test-model/reviews/`, перенос в `test-model/approved/`",
+      "push": "нет",
+      "zones": [
+        "test-model/reviews/**",
+        "test-model/approved/**"
+      ],
+      "pack": "qa-case-reviewer",
+      "prompt": "agents/qa_case_reviewer_agent.md",
+      "in_table": true,
+      "pack_note": "append-only партии"
+    },
+    {
+      "id": "qa_automation",
+      "title": "QA: автоматизатор",
+      "mode": "auto-edit",
+      "zone_text": "`tests/api/**`, `tests/web/**`, `tests/integration/**`, `tests/smoke_cross/**`, `tests/archive/**`, общие `tests/conftest.py`, `tests/README.md`, `tests/__init__.py`, `tests/fixtures/**` (J66); `test-model/bugs/`, `pytest.ini` (J64.18), dev-зависимости",
+      "push": "нет",
+      "zones": [
+        "tests/api/**",
+        "tests/web/**",
+        "tests/integration/**",
+        "tests/smoke_cross/**",
+        "tests/archive/**",
+        "tests/conftest.py",
+        "tests/README.md",
+        "tests/__init__.py",
+        "tests/fixtures/**",
+        "test-model/bugs/*",
+        "pytest.ini"
+      ],
+      "pack": "qa-automation",
+      "prompt": "agents/qa_automation_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "qa_impact_analyst",
+      "title": "QA: impact-аналитик",
+      "mode": "auto-edit",
+      "zone_text": "`test-model/impact/<change-id>.md`",
+      "push": "нет (роль создается при первом change с MODIFIED-дельтами, H5)",
+      "zones": [
+        "test-model/impact/*.md"
+      ],
+      "pack": "qa-impact-analyst",
+      "prompt": "agents/qa_impact_analyst_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "qa_regression_analyst",
+      "title": "QA: регресс-аналитик",
+      "mode": "auto-edit",
+      "zone_text": "`test-model/regression/manifest.md`",
+      "push": "нет (роль создается при первом релизе, G5)",
+      "zones": [
+        "test-model/regression/manifest.md"
+      ],
+      "pack": null,
+      "prompt": null,
+      "in_table": true
+    },
+    {
+      "id": "ui_designer",
+      "title": "Дизайнер UI",
+      "mode": "auto-edit",
+      "zone_text": "`design/**` проекта",
+      "push": "нет (роль создается 2026-09-22 для R2/задачи 2.5, Д-5; мокапы и токены, продукт-код не пишет)",
+      "zones": [
+        "design/**"
+      ],
+      "pack": "ui-designer",
+      "prompt": "agents/ui_designer_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "dev_lead",
+      "title": "Dev-lead (J9)",
+      "mode": "auto-edit",
+      "zone_text": "merge-коммиты и конфликтные правки мерженных веток, чекбоксы `tasks.md`, зачистка worktree",
+      "push": "интеграционной ветки — да, только после зеленых ворот (J9; триггер: dev-делегации завершены → merge только через dev-lead)",
+      "zones": [
+        "openspec/changes/<id>/tasks.md"
+      ],
+      "pack": null,
+      "prompt": "agents/dev_lead_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "integrator",
+      "title": "Integrator (merge_task, Н13)",
+      "mode": "auto-edit",
+      "zone_text": "`code-reviews/**`, `test-model/**` (merge-артефакты; продуктовый код, спеки, deploy — вне зоны)",
+      "push": "нет",
+      "zones": [
+        "code-reviews/**",
+        "test-model/**"
+      ],
+      "pack": null,
+      "prompt": null,
+      "in_table": true
+    },
+    {
+      "id": "pm",
+      "title": "ПМ (оркестратор, сабагент — J1)",
+      "mode": "auto-edit",
+      "zone_text": "`PLAN.md`, `PLAN-*.md` (планы релизов, J41/Н13), `backlog/` (MAP + item'ы, J22), `docs/**` (Н13), README проекта; приемка и push проектного репо после отчета dev-lead; реестр сессий своего `project` (git-исполнительство в продукте запрещено, J9)",
+      "push": "да (проектного репо, после зеленых ворот)",
+      "zones": [
+        "PLAN.md",
+        "PLAN-*.md",
+        "backlog/MAP.md",
+        "backlog/J*.md",
+        "README.md",
+        "docs/**"
+      ],
+      "pack": null,
+      "prompt": "agents/pm_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "debug",
+      "title": "Debug (эскалационный, 14-й)",
+      "mode": "auto-edit",
+      "zone_text": "только `docs/project-pitfalls.md` проекта (база граблей, append-only)",
+      "push": "нет",
+      "zones": [],
+      "pack": "debug",
+      "prompt": "agents/debug_agent.md",
+      "in_table": true,
+      "pack_note": "диагностика без правки продукта; вердикт СРЕДА/КОД/ТЕСТ; зоны политики нет — развилка J64.11"
+    },
+    {
+      "id": "regress_runner",
+      "title": "Regress-раннер (regress_runner, J51.4)",
+      "mode": "auto-edit",
+      "zone_text": "только `test-model/regress/<change-id>/` (артефакты прогонов пишет flowctl regress)",
+      "push": "нет",
+      "zones": [
+        "test-model/regress/<id>/**"
+      ],
+      "pack": "regress-runner",
+      "prompt": "agents/regress_runner_agent.md",
+      "in_table": true,
+      "pack_note": "артефакты прогонов пишет flowctl regress"
+    },
+    {
+      "id": "relay",
+      "title": "Основная сессия (relay)",
+      "mode": "plan",
+      "zone_text": "диалог с Заказчиком; запись не ведет (кроме PLAN-строк приема эскалаций по решению Заказчика)",
+      "push": "нет",
+      "zones": [],
+      "pack": null,
+      "prompt": null,
+      "in_table": true,
+      "empty_policy": true
+    },
+    {
+      "id": "architect",
+      "title": "Архитектор (J46)",
+      "mode": "auto-edit",
+      "zone_text": "`architecture/**` (карта архитектуры), ревью пакета `test-model/reviews/<change-id>/review-*-architecture.md`",
+      "push": "нет",
+      "zones": [
+        "architecture/**",
+        "test-model/reviews/<id>/review-*-architecture.md"
+      ],
+      "pack": "architect",
+      "prompt": "agents/architect_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "devops",
+      "title": "DevOps (J26)",
+      "mode": "auto-edit",
+      "zone_text": "`deploy/**`, `ops/**`, CI-ворота `.github/workflows/**` (J64.18); боевой деплой — только по утверждению",
+      "push": "нет",
+      "zones": [
+        "deploy/**",
+        "ops/**",
+        ".github/workflows/**"
+      ],
+      "pack": "devops",
+      "prompt": "agents/devops_agent.md",
+      "in_table": true,
+      "pack_note": "боевой деплой — только по утверждению ПМ, hermes-стоп"
+    },
+    {
+      "id": "design_validator",
+      "title": "Валидатор дизайна",
+      "mode": "auto-edit",
+      "zone_text": "`test-model/reviews/<change-id>/review-*-design.md`",
+      "push": "нет",
+      "zones": [
+        "test-model/reviews/<id>/review-*-design.md"
+      ],
+      "pack": "design-validator",
+      "prompt": "agents/design_validator_agent.md",
+      "in_table": true
+    },
+    {
+      "id": "qa_author",
+      "title": "QA: автор кейсов (легаси-имя роли)",
+      "mode": "auto-edit",
+      "zone_text": "как qa_case_author",
+      "push": "нет",
+      "zones": [
+        "test-model/new/<id>/**"
+      ],
+      "pack": null,
+      "prompt": null,
+      "in_table": false
+    },
+    {
+      "id": "customer",
+      "title": "Заказчик",
+      "mode": "plan",
+      "zone_text": "запись не ведет",
+      "push": "нет",
+      "zones": [],
+      "pack": null,
+      "prompt": null,
+      "in_table": false,
+      "empty_policy": true
+    },
+    {
+      "id": "auditor",
+      "title": "Аудитор (pi-auditor, вне конвейера)",
+      "mode": "plan",
+      "zone_text": "только чтение",
+      "push": "нет",
+      "zones": [],
+      "pack": "auditor",
+      "prompt": null,
+      "in_table": false,
+      "pack_note": "read-only guard, ручной вызов ПМ; модель — флагами CLI поверх settings.example.json",
+      "model": "kimi k3.1-pro",
+      "provider": "kimi"
+    }
+  ]
+}

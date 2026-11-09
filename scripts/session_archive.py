@@ -21,9 +21,10 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
-LIVE_DIR = Path.home() / ".hermes/cache/delegation/live"
-ARCHIVE_DIR = Path.home() / ".hermes/state/session-archive"
+LIVE_DIR = fp.hermes_home() / "cache" / "delegation" / "live"
+ARCHIVE_DIR = fp.state_dir() / "session-archive"
 
 # Паттерны неуспеха (детерминированный анализ, ярус 2)
 PATTERNS = {

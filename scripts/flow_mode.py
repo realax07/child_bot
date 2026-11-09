@@ -22,8 +22,15 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+try:
+    import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
+    _STATE_DIR = fp.state_dir()
+except ImportError:  # копия ядра в проекте без factory_paths.py — тот же
+    # дефолт и env, что factory_paths.state_dir (session_check → flow_mode)
+    _STATE_DIR = Path(os.environ.get("AF_STATE_DIR", "").strip()
+                      or "~/.hermes/state").expanduser()
 
-DEFAULT_MODE_FILE = Path.home() / ".hermes/state/flow_mode.json"
+DEFAULT_MODE_FILE = _STATE_DIR / "flow_mode.json"
 VALID_MODES = ("shadow", "enforcing")
 # Статусы решений flow_transition, которые enforcing останавливает
 # (shadow — только вычисляет, не исполняет).

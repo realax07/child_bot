@@ -152,43 +152,63 @@ SINGLE_RE = {
     "paths": re.compile(r"\bpaths:\s*(\S+)"),
 }
 
-# Формат scope Флоу 2 (BUG-AF-RECHECK: синхронно с правилом имен репортов
-# test-model/bugs/): единая грамматика — регекс-строка BUG_ID_PATTERN из
-# scripts/flow_check.py (MIN-3 ревью BUG-AF-RECHECK: один источник истины;
-# покрывает BUG-001, BUG-AF-RECHECK-001 и репорты с суффиксом-slug вида
-# BUG-001-search-card-click.md; lowercase/кириллица/пробелы — отклонение,
-# поэтому БЕЗ re.IGNORECASE). Фабрика недоступна → встроенная fallback-копия
-# (синхронизируется тестом tests/test_recheck2_fixes.py).
-def _bug_id_pattern() -> str:
+# Грамматика scope флоу (J65.3): единый источник — scripts/flow_ids.py
+# фабрики (Ф1 change-id, Ф2 имя репорта BUG-…, Ф3 incident-ref S<1-3>-<slug>,
+# Ф4/Ф5 kebab-slug). Плагин работает копией внутри Hermes и не зависит от
+# доступности фабрики: фабрика недоступна → встроенная fallback-копия,
+# совпадение с модулем проверяет тест (tests/unit/test_j65_flow_ids.py).
+_FLOW_IDS_FALLBACK = {
+    "CHANGE_ID_PATTERN": r"^[a-z0-9]+(?:-[a-z0-9]+)+$",
+    "SLUG_PATTERN": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "BUG_ID_PATTERN": r"^BUG-(?:[A-Z0-9]+-)*\d{3}(?:-[a-z0-9][a-z0-9.-]*)?$",
+    "SEVERITY_PREFIXES": ("S1", "S2", "S3"),
+}
+
+
+def _flow_ids_grammar() -> tuple[dict, str]:
+    """(грамматика, источник): источник — "flow_ids" или "fallback"; пишется
+    в тексты отказов маркера, чтобы после выкатки было видно, какой
+    грамматикой работает энфорсер."""
     try:
         scripts_dir = str(factory_home() / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
-        import flow_check
-        return flow_check.BUG_ID_PATTERN
+        import flow_ids
+        return {k: getattr(flow_ids, k) for k in _FLOW_IDS_FALLBACK}, "flow_ids"
     except Exception:  # noqa: BLE001 — плагин не зависит от доступности фабрики
-        return r"^BUG-(?:[A-Z0-9]+-)*\d{3}(?:-[a-z0-9][a-z0-9.-]*)?$"
+        return dict(_FLOW_IDS_FALLBACK), "fallback"
 
 
-BUG_ID_RE = re.compile(_bug_id_pattern())
+_GRAMMAR, GRAMMAR_SOURCE = _flow_ids_grammar()
 
-# J48 (add-incident-protocol, D1/I-1): severity-allowlist Флоу 3 — единый
-# источник истины flow_transition.SEVERITY_PREFIXES (расширение одной правкой);
-# фабрика недоступна → встроенная fallback-копия (синхронизируется тестом).
+
 def _severity_prefixes() -> tuple:
-    try:
-        scripts_dir = str(factory_home() / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import flow_transition
-        return tuple(flow_transition.SEVERITY_PREFIXES)
-    except Exception:  # noqa: BLE001 — плагин не зависит от доступности фабрики
-        return ("S1", "S2", "S3")
+    """Severity-allowlist Флоу 3 (J48 I-1; источник — flow_ids)."""
+    return tuple(_GRAMMAR["SEVERITY_PREFIXES"])
 
 
-SEVERITY_PREFIX_RE = re.compile(
-    "^(?:" + "|".join(re.escape(p) for p in _severity_prefixes()) + ")-")
+_SEVERITY_ALT = "|".join(re.escape(p) for p in _severity_prefixes())
+CHANGE_ID_RE = re.compile(_GRAMMAR["CHANGE_ID_PATTERN"])
+SLUG_RE = re.compile(_GRAMMAR["SLUG_PATTERN"])
+BUG_ID_RE = re.compile(_GRAMMAR["BUG_ID_PATTERN"])
+SEVERITY_PREFIX_RE = re.compile("^(?:" + _SEVERITY_ALT + ")-")
+INCIDENT_REF_RE = re.compile(
+    "^(?:" + _SEVERITY_ALT + r")-[a-z0-9]+(?:-[a-z0-9]+)*$")
 FLOW_IDS = (1, 2, 3, 4, 5)
+
+
+def marker_scope_valid(flow: int, scope: str) -> bool:
+    """scope маркера делегации по грамматике flow_ids с legacy=False:
+    Ф3 — только incident-ref с severity (J48: классификация до реакции)."""
+    if flow == 1:
+        return bool(CHANGE_ID_RE.fullmatch(scope))
+    if flow == 2:
+        return bool(BUG_ID_RE.fullmatch(scope))
+    if flow == 3:
+        return bool(INCIDENT_REF_RE.fullmatch(scope))
+    if flow in (4, 5):
+        return bool(SLUG_RE.fullmatch(scope))
+    return False
 
 # Действие по роли: этапы STAGE_TABLE Флоу 1 (flow_transition.py).
 ROLE_ACTIONS = {
@@ -247,15 +267,15 @@ def action_for_role(role: str, flow: int) -> str:
 NO_CHANGE_DETAIL_PATTERNS = (
     # тексты ворот Флоу 1 о отсутствующем/несозданном change-пакете
     "change-пакет openspec/changes/",
-    # Ф4: scope=chore-slug легален маркеру, но не формату [chore] flow_state
-    "scope не соответствует выбранному флоу",
+    # (Ф4-костыль «scope не соответствует выбранному флоу» снят — J64.3:
+    # flow_state.CHORE_RE принимает chore-slug, отказ — только по существу.)
 )
 
 # Последовательность этапов (J43.1, FLOW_ENFORCER_SEQUENCE=1): действие →
 # обязательные предшественники среди ЗАВЕРШЕННЫХ этапов того же scope.
 # Производная от STAGE_TABLE (scripts/flow_transition.py): каждый предшественник
 # стоит в таблице флоу РАНЬШЕ действия — синхронизация проверяется тестом
-# (tests/test_j431_flow_aware.py::test_sequence_prereqs_match_stage_table).
+# (tests/unit/test_j431_flow_aware.py::test_sequence_prereqs_match_stage_table).
 # Возврат на доработку легален: предшественники уже в completed_actions.
 SEQUENCE_PREREQS: dict[int, dict[str, frozenset]] = {
     1: {
@@ -279,12 +299,14 @@ SEQUENCE_PREREQS: dict[int, dict[str, frozenset]] = {
     },
     2: {
         "bug_fix": frozenset(),
+        "qa_automation": frozenset({"bug_fix"}),  # J66
         "code_review": frozenset({"bug_fix"}),
         "accept_review": frozenset({"code_review"}),
         "merge_task": frozenset({"accept_review"}),
     },
     3: {
         "emergency_stabilize": frozenset(),
+        "qa_automation": frozenset({"emergency_stabilize"}),  # J66
         "accept_review": frozenset({"emergency_stabilize"}),
         "merge_task": frozenset({"accept_review"}),
         "deploy_rollback": frozenset({"merge_task"}),
@@ -296,12 +318,14 @@ SEQUENCE_PREREQS: dict[int, dict[str, frozenset]] = {
     },
     4: {
         "chore_task": frozenset(),
+        "qa_automation": frozenset({"chore_task"}),  # J66
         "code_review": frozenset({"chore_task"}),
         "accept_review": frozenset({"code_review"}),
         "merge_task": frozenset({"accept_review"}),
     },
     5: {
         "express_task": frozenset(),
+        "qa_automation": frozenset({"express_task"}),  # J66
         "express_close": frozenset({"express_task"}),
     },
 }
@@ -627,7 +651,7 @@ def product_repo_paths() -> list[str]:
         for part in (x.strip() for x in raw.split(",") if x.strip()):
             cand = Path(part).expanduser()
             if not cand.is_absolute():
-                cand = Path.home() / part
+                cand = projects_root() / part
             out.append(str(cand))
         return out
     try:
@@ -642,7 +666,7 @@ def product_repo_paths() -> list[str]:
         project = str(s.get("project") or "")
         if not project or project == CONVEYOR_PROJECT:
             continue
-        cand = Path.home() / project
+        cand = projects_root() / project
         if (cand.is_dir() and (cand / ".git").exists()
                 and str(cand) not in repos):
             repos.append(str(cand))
@@ -817,14 +841,29 @@ class FlowMarkerError(ValueError):
     """Очевидная ошибка маркера → block FLOW_MARKER_INVALID (J43.1)."""
 
 
+# Пути машины (J64.5): те же env и дефолты, что scripts/factory_paths.py.
+# Плагин ставится копией в ~/.hermes/plugins и работает в процессе Hermes —
+# модуль фабрики не импортирует; паритет держит тест
+# (tests/unit/test_factory_paths.py::test_enforcer_paths_parity).
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else default
+
+
 def state_dir() -> Path:
-    return Path(os.environ.get(
-        "FLOW_ENFORCER_STATE_DIR", str(Path.home() / ".hermes" / "state")))
+    """Логи энфорсера и реестр по умолчанию: FLOW_ENFORCER_STATE_DIR, иначе
+    память движка (AF_STATE_DIR → ~/.hermes/state; от HERMES_HOME не
+    зависит — см. factory_paths.state_dir)."""
+    engine = _env_path("AF_STATE_DIR", Path.home() / ".hermes" / "state")
+    return _env_path("FLOW_ENFORCER_STATE_DIR", engine)
 
 
 def factory_home() -> Path:
-    return Path(os.environ.get(
-        "AI_FACTORY_HOME", str(Path.home() / "ai-factory"))).expanduser()
+    return _env_path("AI_FACTORY_HOME", Path.home() / "ai-factory")
+
+
+def projects_root() -> Path:
+    return _env_path("AF_PROJECTS_ROOT", Path.home())
 
 
 def mode() -> str:
@@ -972,26 +1011,39 @@ def validate_scope_for_flow(flow: int, scope: str) -> None:
     репорта test-model/bugs/, расширен 5c21489: BUG-001 и BUG-AF-RECHECK-001
     оба валидны); Ф3 S<1|2|3>-<краткий-ид> (J48: severity-классификация
     инцидента обязательна до реакции, FR-1/FR-4; невалидный формат —
-    FLOW_MARKER_INVALID); Ф1 change-id / Ф4 chore-slug /
-    Ф5 slug — непустая строка (пустой отсечен при разборе)."""
+    FLOW_MARKER_INVALID); Ф1 kebab change-id, Ф4/Ф5 kebab-slug (J65.3:
+    грамматика flow_ids — тот же отказ, что дал бы движок, но на спавне)."""
     if not scope:
         raise FlowMarkerError(
             "пустой scope — scope обязателен (Ф1 change-id, "
             "Ф2 BUG-<КОМПЛЕКС>-NNN, Ф3 S<1|2|3>-<краткий-ид>, Ф4 chore-slug, "
             "Ф5 slug)")
-    if flow == 2 and not BUG_ID_RE.match(scope):
+    if flow == 2 and not marker_scope_valid(2, scope):
         raise FlowMarkerError(
             f"Флоу 2 требует scope формата BUG-<КОМПЛЕКС>-NNN "
             f"(BUG-001 или BUG-AF-RECHECK-001; A-Z0-9, дефис-разделитель), "
-            f"получено {scope!r} (репорт test-model/bugs/<scope>.md)")
-    if flow == 3 and not SEVERITY_PREFIX_RE.match(scope):
+            f"получено {scope!r} (репорт test-model/bugs/<scope>.md; "
+            f"грамматика: {GRAMMAR_SOURCE})")
+    if flow == 3 and not marker_scope_valid(3, scope):
         # J48 (D1/FR-4): severity внутри incident_ref — маркер обязан нести
         # классификацию; неклассифицированный инцидент не запускает реакцию
         # (очевидная ошибка маркера → FLOW_MARKER_INVALID).
         raise FlowMarkerError(
-            f"Флоу 3 требует scope формата S<1|2|3>-<краткий-ид> — "
+            f"Флоу 3 требует scope формата S<1|2|3>-<kebab-slug>, строчные "
+            f"буквы/цифры через дефис, например S1-prod-down — "
             f"severity-классификация инцидента обязательна до реакции "
-            f"(J48; FR-1/FR-4; получено {scope!r})")
+            f"(J48; FR-1/FR-4; получено {scope!r}; грамматика: {GRAMMAR_SOURCE})")
+    if flow == 1 and not marker_scope_valid(1, scope):
+        raise FlowMarkerError(
+            f"Флоу 1 требует scope — kebab-case change-id, например "
+            f"add-widget (получено {scope!r}; грамматика: {GRAMMAR_SOURCE})")
+    if flow in (4, 5) and not marker_scope_valid(flow, scope):
+        raise FlowMarkerError(
+            f"Флоу {flow} требует scope — kebab-slug, например "
+            f"{'repo-cleanup' if flow == 4 else 'fix-typo'} "
+            f"(получено {scope!r}; грамматика: {GRAMMAR_SOURCE})")
+    if flow not in FLOW_IDS:  # fail-closed: не полагаемся на порядок вызовов
+        raise FlowMarkerError(f"flow={flow!r} вне 1–5 — ожидается flow=<1-5>")
 
 
 def resolve_flow(markers: dict) -> tuple[int, bool]:
@@ -1164,6 +1216,37 @@ def parse_decision_output(out: str) -> dict | None:
     except ValueError:
         return None
     return data.get("decision") if isinstance(data, dict) else None
+
+
+def decision_summary(out: str) -> str:
+    """Коды и детали отказа prepare — в начало сообщения ПМ (J64.18):
+    хвост сырого JSON обрезается по длине, а ключи отсортированы — причины
+    (decision, reason) стоят в начале и при росте полей (policy_version)
+    уходили за обрез, ПМ видел отказ без кода."""
+    idx = out.find("{")
+    try:
+        data = json.loads(out[idx:]) if idx >= 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return ""
+    def _as_list(value) -> list:
+        return value if isinstance(value, list) else []
+
+    lines = []
+    if data.get("reason"):
+        lines.append(f"причина: {data['reason']}")
+    record = data.get("record") if isinstance(data.get("record"), dict) else {}
+    decision = data.get("decision") or record.get("decision") or {}
+    if not isinstance(decision, dict):
+        decision = {}
+    if decision.get("status") and decision["status"] != data.get("reason"):
+        lines.append(f"решение: {decision['status']}")
+    lines += [f"- {d}" for d in _as_list(decision.get("details"))]
+    lines += [f"- {v}" for v in _as_list(data.get("zone_violations"))]
+    lines += [f"- защищенный путь: {p}"
+              for p in _as_list(data.get("protected_paths"))]
+    return "\n".join(lines)
 
 
 def scope_file_candidates(flow: int, repo: Path, scope: str) -> list[Path]:
@@ -1425,8 +1508,9 @@ def flow_enforce(tool_name: str, args: dict, task_id: str = "",
         return {"action": "block", "message": (
             f"FLOW-ENFORCER: flowctl prepare отклонил делегацию "
             f"(exit {rc}, flow={flow}, role={markers['role']}, "
-            f"repo={markers['repo']}, scope={markers['scope']}). "
-            f"Вывод ворот:\n"
+            f"repo={markers['repo']}, scope={markers['scope']}).\n"
+            f"{decision_summary(out)}\n"
+            f"Вывод ворот (хвост):\n"
             f"{out.strip()[-2000:]}")}
     except FlowMarkerError as exc:
         log_event({"event": "flow_marker_invalid", "task_id": task_id,

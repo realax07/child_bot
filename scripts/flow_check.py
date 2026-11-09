@@ -9,8 +9,26 @@ Usage: python3 scripts/flow_check.py <path-to-repo>
 """
 import json
 import re
+import os
 import sys
 from pathlib import Path
+try:
+    import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
+except ImportError:  # автономная копия в проекте без factory_paths.py (AGENTS.md:
+    # в проект копируются flow_check/pr_validate + flow.yml) — те же env и
+    # дефолты, что factory_paths; CI проекта не падает на импорте.
+    from types import SimpleNamespace as _NS
+
+    def _fp_env(name: str, default: str) -> Path:
+        return Path(os.environ.get(name, "").strip() or default).expanduser()
+
+    fp = _NS(
+        factory_home=lambda: _fp_env("AI_FACTORY_HOME", "~/ai-factory"),
+        hermes_home=lambda: _fp_env("HERMES_HOME", "~/.hermes"),
+        state_dir=lambda: _fp_env("AF_STATE_DIR", "~/.hermes/state"),
+        flowctl_state_path=lambda: _fp_env(
+            "AF_STATE_DIR", "~/.hermes/state") / "flowctl_state.json",
+    )
 
 CHANGE_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)+$")  # kebab-case, >= 2 слов
 TC_REF = re.compile(r"TC-[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*-\d{3}")
@@ -58,13 +76,23 @@ REVIEW_FILE_TASK_FIRST = re.compile(r"^review-(.+?)-(\d{3})\.md$", re.I)
 # None → ложный FAIL J10 на валидном review-файле).
 VERDICT_LINE_RE = re.compile(
     r"^#{1,4}\s*(?:\d+(?:\.\d+)*[.)]?\s+)?Вердикт\s*:?\s*(.+)$", re.I | re.M)
+# \s после «Вердикт» сознательно переходит строку: в проектах вердикт часто
+# пишут «## Вердикт» и значение следующей строкой (J65.4: сужение до [ \t]
+# ломало 19 реальных review-файлов).
 VERDICT_APPROVE_RE = re.compile(r"\b(approve|approved|одобрен\w*|одобрить)\b", re.I)
 # SELF_REVIEW-защита (решение Заказчика 2026-10-03): review-файл обязан нести
 # Reviewer-Delegation: deleg_<id> — платформенный id делегации ревьюера
 # (реестр async_delegations устойчив к пересозданию main-сессий: id
 # уникален и не зависит от имени сессии).
 REVIEWER_META_RE = re.compile(r"Reviewer-Delegation[^A-Za-z0-9]{0,6}(deleg[-_][A-Za-z0-9]+)", re.I)
-VERDICT_RETURN_RE = re.compile(r"\b(return|доработк\w*)\b", re.I)
+VERDICT_RETURN_RE = re.compile(r"\b(return|returned|доработк\w*|вернуть)\b", re.I)
+# J65.4: «Не одобрить» — отказ, а не approve по слову «одобрить».
+VERDICT_NEGATED_RE = re.compile(r"\bне\s+одобр\w*", re.I)
+# J65.4: строка «Commit: <sha>» (или «Reviewed-Commit:») — на каком коммите
+# выдан вердикт; раннер сверяет ее с проверявшимся HEAD (STALE).
+REVIEW_COMMIT_RE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?(?:Reviewed-)?Commit(?:\*\*)?:(?:\*\*)?[ \t]*"
+    r"`?([0-9a-f]{7,40})`?[ \t]*$", re.I | re.M)
 QA_SECTION = "6"  # раздел 6.x — QA-цикл, не dev (J10)
 
 # --- J46: карта архитектуры — обязательный артефакт (решение Заказчика
@@ -176,16 +204,28 @@ def closed_dev_tasks(tasks_text: str) -> list[str]:
 
 
 def parse_verdict(text: str) -> str | None:
-    """Вердикт из review-файла по формату code_reviewer_agent.md: 'approve' | 'return' | None."""
+    """Вердикт из review-файла по формату code_reviewer_agent.md: 'approve' | 'return' | None.
+
+    Вердикт — заголовок `## Вердикт: approve|return` (или Одобрить/Вернуть).
+    Решает ПОСЛЕДНИЙ решающий заголовок файла (J65.4): повторная проверка,
+    дописанная в конец append-only файла, отменяет прежний вердикт.
+    «return»/«Вернуть»/«доработка» и «Не одобрить» — return; заголовок с
+    обоими словами (шаблон «Одобрить / Вернуть») — return (fail-closed).
+    Строка без заголовка (`Вердикт: …` прозой) вердиктом не считается."""
+    found = None
     for m in VERDICT_LINE_RE.finditer(text):
         v = m.group(1).strip().strip("*").strip().lower()
-        has_return = bool(VERDICT_RETURN_RE.search(v))
-        has_approve = bool(VERDICT_APPROVE_RE.search(v))
-        if has_return:
-            return "return"
-        if has_approve:
-            return "approve"
-    return None
+        if VERDICT_RETURN_RE.search(v) or VERDICT_NEGATED_RE.search(v):
+            found = "return"
+        elif VERDICT_APPROVE_RE.search(v):
+            found = "approve"
+    return found
+
+
+def review_commit(text: str) -> str | None:
+    """SHA из последней строки `Commit: <sha>` review-файла или None (J65.4)."""
+    found = REVIEW_COMMIT_RE.findall(text)
+    return found[-1].lower() if found else None
 
 
 def approved_review_tasks(repo: Path, change_id: str,
@@ -329,6 +369,118 @@ def map_verdict_ok(repo: Path, change_id: str) -> tuple[bool, str]:
     return False, ", ".join(rf.name for rf in files)
 
 
+# --- J66: раскладка автотестов (спека qa-pipeline, «Раскладка автотестов») ---
+# tests/unit — dev; tests/api|web|integration (+ smoke_cross, archive) —
+# qa_automation. Строгость — test-model/test-layout.json {"mode": ...}:
+# warn (дефолт, файла нет) → FLOW-WARNING, strict → FLOW-ERROR; битый файл —
+# FLOW-ERROR (не молчаливый дефолт). Смягчение strict → warn — решение
+# Заказчика (файл — PROTECTED_PATHS).
+TEST_LAYOUT_REL = "test-model/test-layout.json"
+TEST_LAYOUT_MODES = ("warn", "strict")
+TEST_LAYOUT_DIRS = ("unit", "api", "web", "integration", "smoke_cross", "archive")
+# Каталоги без требования TC-ID (тесты dev пишутся без кейсов).
+TEST_LAYOUT_NO_TC = ("unit",)
+# Стек уровня: запрещенные импорты (unit/integration — без сети и браузера).
+TEST_LAYOUT_FORBIDDEN = {
+    "unit": ("requests", "playwright"),
+    "integration": ("requests", "playwright"),
+    "api": ("playwright",),
+}
+
+
+def imported_top_modules(text: str) -> set[str] | None:
+    """Верхние имена импортируемых модулей (ast: import a, b / from a.b import
+    c; вложенные в функции — тоже). Динамика `importlib.import_module("x")` и
+    `pytest.importorskip("x")` со строковым литералом учитывается. Строки и
+    docstring не считаются. SyntaxError → None (вызывающий решает)."""
+    import ast
+    import warnings
+    try:
+        # SyntaxWarning (например, "\\d" в строке теста) — не дело ворот:
+        # без подавления она шумит в stderr, а под -W error ломает разбор.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text, filename="<test>")
+    except SyntaxError:
+        return None
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            mods.add(node.module.split(".")[0])
+        elif (isinstance(node, ast.Call) and node.args
+              and isinstance(node.args[0], ast.Constant)
+              and isinstance(node.args[0].value, str)):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else (
+                fn.id if isinstance(fn, ast.Name) else "")
+            if name in ("import_module", "importorskip", "__import__"):
+                mods.add(node.args[0].value.split(".")[0])
+    return mods
+
+
+def layout_mode_of(repo: Path) -> tuple[str, str | None]:
+    """Режим раскладки проекта: (mode, problem). Файла нет → ("warn", None);
+    нечитаемый/неизвестный режим → ("strict", описание) — вызывающий
+    обязан выдать FLOW-ERROR."""
+    path = repo / TEST_LAYOUT_REL
+    if not path.is_file():
+        return "warn", None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return "strict", f"{TEST_LAYOUT_REL} не читается ({exc})"
+    mode = data.get("mode") if isinstance(data, dict) else None
+    if mode not in TEST_LAYOUT_MODES:
+        return "strict", (f"{TEST_LAYOUT_REL}: mode={mode!r}, ожидается "
+                          f"{'|'.join(TEST_LAYOUT_MODES)}")
+    return mode, None
+
+
+def layout_level_of(repo: Path, tf: Path) -> str | None:
+    """Каталог уровня тестового файла (unit/api/…) или None — вне раскладки."""
+    parts = tf.relative_to(repo / "tests").parts
+    if len(parts) >= 2 and parts[0] in TEST_LAYOUT_DIRS:
+        return parts[0]
+    return None
+
+
+def layout_findings(repo: Path, test_files: list[Path]) -> list[str]:
+    """Нарушения раскладки и стека уровня (без учета режима)."""
+    out: list[str] = []
+    for tf in sorted(test_files):
+        rel = tf.relative_to(repo)
+        level = layout_level_of(repo, tf)
+        if level is None:
+            out.append(f"{rel}: тест вне раскладки tests/"
+                       f"{{{','.join(TEST_LAYOUT_DIRS)}}}/ (J66)")
+            continue
+        forbidden = TEST_LAYOUT_FORBIDDEN.get(level, ())
+        if not forbidden:
+            continue
+        mods = imported_top_modules(
+            tf.read_text(encoding="utf-8", errors="replace"))
+        if mods is None:
+            out.append(f"{rel}: не разбирается (SyntaxError) — стек уровня "
+                       f"tests/{level}/ не проверен (J66)")
+            continue
+        for mod in forbidden:
+            if mod in mods:
+                out.append(f"{rel}: импорт {mod} в tests/{level}/ — "
+                           f"нарушение стека уровня (J66)")
+    return out
+
+
+def is_legacy_impact_template(d: Path) -> bool:
+    """openspec/changes/_template/ с одним impact.md (и без specs/) —
+    шаблон, который factory_init клал туда до 2026-11-07."""
+    if d.name != "_template" or not d.is_dir():
+        return False
+    files = [p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file()]
+    return files == ["impact.md"]
+
+
 def errs(*msg):
     for m in msg:
         print(f"FLOW-ERROR: {m}")
@@ -360,7 +512,7 @@ def check(repo: Path) -> int:
     # --- factory-init: рассинхрон промптов с эталоном фабрики (если фабрика на машине) ---
     project_agents = repo / "agents"
     if project_agents.is_dir():
-        factory_agents = Path.home() / "ai-factory/agents"
+        factory_agents = fp.factory_home() / "agents"
         if factory_agents.is_dir():
             import hashlib
             stale = []
@@ -476,6 +628,14 @@ def check(repo: Path) -> int:
     if ch_dir.is_dir():
         for d in sorted(p for p in ch_dir.iterdir() if p.is_dir()):
             if d.name == "archive":
+                continue
+            if is_legacy_impact_template(d):
+                # прежнее место шаблона impact-карты (factory_init до
+                # 2026-11-07): только _template/impact.md, без дельт — не
+                # change-пакет. Любой другой _* проверяется как пакет.
+                warns(f"openspec/changes/{d.name}/: легаси-шаблон impact-карты "
+                      "— удали каталог (шаблон теперь templates/impact.template.md; "
+                      "openspec validate --strict на нем падает)")
                 continue
             active_changes.append(d)
             change_req = d / "requirements.md"
@@ -635,15 +795,31 @@ def check(repo: Path) -> int:
         has_regression_cases = reg_dir.is_dir() and any(
             d.is_dir() and not d.name.startswith(".") for d in reg_dir.iterdir()
         ) and any(f.suffix == ".md" for f in reg_dir.rglob("*.md"))
-        if test_files and not any(approved_by_change.values()) and not has_regression_cases:
+        # J66: unit-тесты dev пишутся без кейсов — правило контракта 6 о
+        # кейс-базе касается только приемочных тестов.
+        acceptance_files = [tf for tf in test_files
+                            if layout_level_of(repo, tf) not in TEST_LAYOUT_NO_TC]
+        if acceptance_files and not any(approved_by_change.values()) and not has_regression_cases:
             errors += errs(
                 "tests/: автотесты без approved-кейсов и без as-is базы "
                 "test-model/regression/<domain>/ (контракт 6)"
             )
+        # J66: раскладка по уровням; режим warn|strict из test-layout.json.
+        layout_mode, layout_problem = layout_mode_of(repo)
+        if layout_problem:
+            errors += errs(layout_problem)
+        layout_report = errs if layout_mode == "strict" else warns
+        findings = layout_findings(repo, test_files)
+        if findings:
+            n = layout_report(*findings)
+            if layout_mode == "strict":
+                errors += n
         for tf in test_files:
             text = tf.read_text(encoding="utf-8", errors="replace")
             if re.search(r"\btime\.sleep\(", text):
                 errors += errs(f"{tf.relative_to(repo)}: time.sleep запрещен (спека qa-pipeline)")
+            if layout_level_of(repo, tf) in TEST_LAYOUT_NO_TC:
+                continue  # unit-тесты dev — без TC-ID (спека, «Трассировка»)
             doc_tests = re.findall(r'def (test_\w+)', text)
             if doc_tests and not TC_REF.search(text):
                 errors += errs(f"{tf.relative_to(repo)}: тесты без TC-трассировки в docstring (rule 6)")

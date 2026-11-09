@@ -22,6 +22,23 @@ import urllib.request
 from pathlib import Path
 
 import session_check as _sc  # noqa: E402  (единая валидация change-id, J51)
+try:
+    import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
+except ImportError:  # автономная копия в проекте без factory_paths.py (AGENTS.md:
+    # в проект копируются flow_check/pr_validate + flow.yml) — те же env и
+    # дефолты, что factory_paths; CI проекта не падает на импорте.
+    from types import SimpleNamespace as _NS
+
+    def _fp_env(name: str, default: str) -> Path:
+        return Path(os.environ.get(name, "").strip() or default).expanduser()
+
+    fp = _NS(
+        factory_home=lambda: _fp_env("AI_FACTORY_HOME", "~/ai-factory"),
+        hermes_home=lambda: _fp_env("HERMES_HOME", "~/.hermes"),
+        state_dir=lambda: _fp_env("AF_STATE_DIR", "~/.hermes/state"),
+        flowctl_state_path=lambda: _fp_env(
+            "AF_STATE_DIR", "~/.hermes/state") / "flowctl_state.json",
+    )
 
 # --- Наборы обязательных артефактов по типам (контракты) ---
 
@@ -138,11 +155,11 @@ def check_change(repo: Path, change_id: str, marker: str = "") -> list[str]:
     # привязки к pr_tasks: подделка артефакта ловится даже когда задачи не
     # упомянуты в тексте PR.
     import sqlite3 as _sq
-    _db = Path.home() / ".hermes" / "state.db"
+    _db = fp.hermes_home() / "state.db"
     _dev_delegs: set = set()
     try:
         import json as _json
-        _fstate = _json.loads((Path.home() / ".hermes" / "state" / "flowctl_state.json").read_text(encoding="utf-8"))
+        _fstate = _json.loads(fp.flowctl_state_path().read_text(encoding="utf-8"))
         for _r in _fstate.get("runs", {}).values():
             _sc = _r.get("scope") or {}
             if _sc.get("change") == change_id and _sc.get("task"):
@@ -711,7 +728,7 @@ def impact_map_problem(repo: Path, change_id: str) -> str | None:
     return (
         f"openspec/changes/{change_id}/impact.md: impact-карта отсутствует "
         "(J58: обязательный артефакт СА — создай impact.md по шаблону "
-        "openspec/changes/_template/impact.md или добавь секцию "
+        "templates/impact.template.md или добавь секцию "
         "«## Impact» в design.md/proposal.md: затронутые сервисы / контракты / "
         "статика (static_v?) / deploy-матрица + RUNBOOK / миграции / тесты)"
     )

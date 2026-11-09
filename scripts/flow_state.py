@@ -37,24 +37,26 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
+import flow_ids  # noqa: E402  (J65.3: грамматика scope — только оттуда)
 
 SCHEMA_VERSION = "flow-snapshot/1"
 
-FLOW_IDS = (1, 2, 3, 4, 5)
+FLOW_IDS = flow_ids.FLOW_IDS
 
-CHANGE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+$")
-BUG_ID_RE = re.compile(r"^BUG-\d{3}$", re.IGNORECASE)
-CHORE_RE = re.compile(r"^chore$", re.IGNORECASE)
+# Имена сохранены для совместимости вызывающих; грамматика — flow_ids.
+CHANGE_ID_RE = flow_ids.CHANGE_ID_RE
+BUG_ID_RE = flow_ids.BUG_ID_RE
+CHORE_RE = flow_ids.SLUG_RE
 
-# Флоу 1 — kebab-case change-id; Флоу 2/3 — BUG-NNN; Флоу 4 — [chore];
-# Флоу 5 — экспресс-режим: идентификатор change + evidence ретроспективных
-# артефактов (requirements/спека-дельта/кейсы) по BACKLOG I1 (см. README фабрики).
+# Флоу 5 — экспресс-режим: slug + evidence ретроспективных артефактов
+# (requirements/спека-дельта/кейсы) по BACKLOG I1 (см. README фабрики).
 FLOW_EXPECTATIONS = {
     1: "kebab-case change-id (openspec/changes/<id>/)",
-    2: "BUG-NNN (test-model/bugs/)",
-    3: "BUG-NNN (test-model/bugs/)",
-    4: "[chore] (обслуживание, спека не меняется)",
-    5: "change-id + ретроспективные артефакты (requirements/спека/кейсы)",
+    2: "BUG-<КОМПЛЕКС>-NNN (test-model/bugs/)",
+    3: "incident-ref S<1|2|3>-<slug> (легаси: BUG-NNN)",
+    4: "chore или kebab-slug пакета (обслуживание, спека не меняется)",
+    5: "kebab-slug + ретроспективные артефакты (requirements/спека/кейсы)",
 }
 
 # Обязательный идентификатор выбранного Флоу (ТЗ 02, п.6; ТЗ 03 п.6).
@@ -820,35 +822,16 @@ def registry_fact(registry_path: Path, problems: list) -> tuple[Fact, str]:
 
 
 def check_flow_identifier(repo: Path, flow: int, change_id: str, problems: list) -> None:
-    """Обязательный идентификатор выбранного Флоу (ТЗ 02 п.6)."""
-    if flow in (2, 3):
-        if not BUG_ID_RE.match(change_id):
-            problems.append(Problem(
-                code="FLOW_ID_INVALID",
-                detail=f"Флоу {flow} требует идентификатор BUG-NNN, получено: {change_id!r}",
-                source="scope",
-            ))
-    elif flow == 1:
-        if not CHANGE_ID_RE.match(change_id):
-            problems.append(Problem(
-                code="FLOW_ID_INVALID",
-                detail=f"Флоу 1 требует kebab-case change-id, получено: {change_id!r}",
-                source="scope",
-            ))
-    elif flow == 4:
-        if not CHORE_RE.match(change_id):
-            problems.append(Problem(
-                code="FLOW_ID_INVALID",
-                detail=f"Флоу 4 (обслуживание) требует маркер [chore], получено: {change_id!r}",
-                source="scope",
-            ))
-    elif flow == 5:
-        if not CHANGE_ID_RE.match(change_id):
-            problems.append(Problem(
-                code="FLOW_ID_INVALID",
-                detail=f"Флоу 5 (экспресс) требует change-id, получено: {change_id!r}",
-                source="scope",
-            ))
+    """Обязательный идентификатор выбранного Флоу (ТЗ 02 п.6); грамматика —
+    flow_ids (J65.3), Ф3 принимает и легаси BUG-…."""
+    if flow in flow_ids.FLOW_IDS and not flow_ids.valid_scope(flow, change_id):
+        problems.append(Problem(
+            code="FLOW_ID_INVALID",
+            detail=(f"Флоу {flow} требует {flow_ids.SCOPE_HINTS[flow]}, "
+                    f"получено: {change_id!r}"),
+            source="scope",
+        ))
+    if flow == 5:
         # Ретроспективные артефакты Флоу 5: их отсутствие = unknown, не ready.
         retro_missing = []
         for rel in ("requirements.md",):
@@ -927,7 +910,7 @@ def inspect(
         facts.append(task_fact(repo, change_id, task_id, problems))
 
     reg_path = Path(registry) if registry else (
-        Path.home() / ".hermes" / "state" / "active_sessions.json"
+        fp.registry_path()
     )
     reg_fact, registry_digest = registry_fact(reg_path, problems)
     facts.append(reg_fact)

@@ -22,8 +22,9 @@ failed → closed. Смена статуса несет evidence и причин
 зон активных сессий того же repo → ZONE_CONFLICT: ровно одна сессия владеет
 путем. P0.3: резервация требует policy_version — редакцию политики зон роли
 (ROLE_ZONE_POLICY; сужение выполняет flowctl prepare до резервации); версия
-хранится в записи и попадает в verdict finish (ZONE_POLICY_MISMATCH при
-расхождении редакций).
+хранится в записи для аудита. J65.2: рядом — role_zone_digest, отпечаток
+зоны своей роли; finish сверяет его (ZONE_POLICY_MISMATCH при изменении зоны
+своей роли; правка чужой роли сессию не задевает).
 
 Usage:
     python3 scripts/session_check.py reserve --registry PATH --repo PATH \
@@ -405,6 +406,19 @@ def git_toplevel(repo: Path) -> str | None:
     return out.strip() if rc == 0 else None
 
 
+def git_main_root(repo: Path) -> str | None:
+    """Корень основного дерева репозитория (общий для всех его worktree):
+    зоны записи принадлежат репозиторию, не дереву — сессия в worktree и
+    делегация в основном клоне делят одно пространство зон."""
+    rc, out, _ = git(repo, "rev-parse", "--path-format=absolute",
+                     "--git-common-dir")
+    if rc == 0 and out.strip():
+        common = Path(out.strip())
+        if common.name == ".git":
+            return str(common.parent)
+    return git_toplevel(repo)
+
+
 def git_branch(repo: Path) -> str | None:
     rc, out, _ = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     return out.strip() if rc == 0 else None
@@ -511,10 +525,12 @@ def reserve(req: dict, registry_path: Path | str) -> dict:
                 "details": problems, "delegation_id": req.get("delegation_id", "")}
 
     repo = Path(req["repo"])
-    toplevel = git_toplevel(repo)
+    toplevel = git_main_root(repo)
     if toplevel:
         req = dict(req)
-        req["repo"] = toplevel  # канонический repo — base сравнения зон
+        # канонический repo — base сравнения зон: основной клон, даже если
+        # передан путь его worktree (снимок фактов берется из дерева сессии)
+        req["repo"] = toplevel
 
     lock = _acquire_lock(registry_path)
     try:
@@ -539,14 +555,19 @@ def reserve(req: dict, registry_path: Path | str) -> dict:
                 "role": req["role"], "project": req["project"],
                 "owner_pm": req["owner_pm"], "repo": req.get("repo"),
                 "paths": sorted(zone_patterns),
-                "policy_version": req.get("policy_version"),
+                # J65.2: редакция — по зоне своей роли; policy_version
+                # реестра целиком — только при легаси-записи без отпечатка
+                "policy": (req.get("role_zone_digest")
+                           if mine.get("role_zone_digest")
+                           else req.get("policy_version")),
                 "worktree": req.get("worktree"), "branch": req.get("branch"),
             }
             payload_old = {
                 "role": mine.get("role"), "project": mine.get("project"),
                 "owner_pm": mine.get("owner_pm"), "repo": mine.get("repo"),
                 "paths": sorted(mine.get("zones") or mine.get("paths") or []),
-                "policy_version": mine.get("policy_version"),
+                "policy": (mine.get("role_zone_digest")
+                           or mine.get("policy_version")),
                 "worktree": mine.get("worktree"), "branch": mine.get("branch"),
             }
             if payload_new == payload_old:
@@ -595,6 +616,9 @@ def reserve(req: dict, registry_path: Path | str) -> dict:
             "repo": req.get("repo"),
             "zones": zone_patterns,
             "policy_version": req.get("policy_version"),
+            # J65.2: отпечаток зоны своей роли — сверяется на finish
+            # (резервация без поля — легаси, сверка по покрытию политикой).
+            "role_zone_digest": req.get("role_zone_digest"),
             "worktree": req.get("worktree"),
             "branch": req.get("branch"),
             "base_sha": req.get("base_sha"),

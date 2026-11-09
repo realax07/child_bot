@@ -30,20 +30,21 @@ import json
 import sys
 import time
 from pathlib import Path
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
-REGISTRY_DB = Path.home() / ".hermes" / "state.db"   # async_delegations — платформенный факт
-FLOWCTL_STATE = Path.home() / ".hermes" / "state" / "flowctl_state.json"
-INCIDENTS = Path.home() / ".hermes" / "state" / "delegate_bypass_incidents.json"
-PM_NUDGE_STATE = Path.home() / ".hermes" / "state" / "delegate_watchdog_pm_nudge.json"
-ACK_STATE = Path.home() / ".hermes" / "state" / "delegate_watchdog_ack.json"
+REGISTRY_DB = fp.hermes_home() / "state.db"   # async_delegations — платформенный факт
+FLOWCTL_STATE = fp.state_dir() / "flowctl_state.json"
+INCIDENTS = fp.state_dir() / "delegate_bypass_incidents.json"
+PM_NUDGE_STATE = fp.state_dir() / "delegate_watchdog_pm_nudge.json"
+ACK_STATE = fp.state_dir() / "delegate_watchdog_ack.json"
 # GATED_MAP: платформенные delegation_id, диспатченные ЧЕРЕЗ ворота. Gate start
 # генерирует свой correlation/delegation-id ДО диспатча (circular: платформенный
 # id появляется только в ответе delegate_task), поэтому прямое сопоставление
 # невозможно. ПМ после диспатча вписывает пару platform_id → correlation_id.
 # Ложный STALE на легитимную делегацию (прецедент deleg_d47a77a2, 2026-10-04)
 # без этого маппинга: platform id не входит в gated-множество → «забыт finish».
-GATED_MAP_STATE = Path.home() / ".hermes" / "state" / "delegate_gate_gated_map.json"
-PM_INSTRUCTION_STATE = Path.home() / ".hermes" / "state" / "pm_instruction.txt"
+GATED_MAP_STATE = fp.state_dir() / "delegate_gate_gated_map.json"
+PM_INSTRUCTION_STATE = fp.state_dir() / "pm_instruction.txt"
 GRACE_SECONDS = 120  # делегациям младше 2 минут даем время на prepare (гонка старт)
 # Анти-рекурсия (требование Заказчика 2026-10-04): [PM-INSTRUCTION] доставляется
 # ПМ как OUT-OF-BAND; ПМ в ответе может триггерить новые делегации → новый
@@ -96,7 +97,7 @@ def load_delegations() -> list[dict] | None:
 
 
 def _baseline_path() -> Path:
-    return Path.home() / ".hermes" / "state" / "delegate_gate_baseline.json"
+    return fp.state_dir() / "delegate_gate_baseline.json"
 
 
 def _scan(delegations, flow, gated_map=None, baseline=None, now=None):

@@ -34,13 +34,14 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
 CMDLINE_PATTERNS = ("uvicorn", "http.server", "nginx")
 ALLOWED_USERS = {"openclaw"}
 DEFAULT_MIN_AGE_SEC = 600  # 10 минут: защита от гонки с живой сессией
 GRACE_SEC = 3.0
 WORKTREE_MARKERS = ("-worktrees/", "-worktree/")
-HOME = os.path.expanduser("~")
+HOME = str(fp.projects_root())  # корень обхода клонов проектов (J64.5)
 
 
 @dataclass
@@ -91,7 +92,7 @@ def _cwd(pid: int) -> str | None:
 
 def _active_session_ids() -> set[str]:
     """session-id из active_sessions.json (если читается)."""
-    path = os.path.expanduser("~/.hermes/state/active_sessions.json")
+    path = str(fp.registry_path())
     ids: set[str] = set()
     try:
         data = json.load(open(path, encoding="utf-8"))

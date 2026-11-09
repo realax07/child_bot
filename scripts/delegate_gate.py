@@ -55,9 +55,10 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
-STATE = Path.home() / ".hermes" / "state" / "flowctl_state.json"
-REGISTRY = Path.home() / ".hermes" / "state" / "active_sessions.json"
+STATE = fp.flowctl_state_path()
+REGISTRY = fp.registry_path()
 
 # Минимальные обязательные гейты финиша по флоу (дополнительные добавляет
 # flowctl из политики; обертка гарантирует нижнюю границу).
@@ -211,7 +212,7 @@ def main() -> int:
     ps.add_argument("--repo", default=".")
     ps.add_argument("--project", required=True)
     ps.add_argument("--flow", type=int, required=True, choices=[1, 2, 3, 4, 5])
-    ps.add_argument("--change", required=True)  # Флоу 4: ровно "chore"
+    ps.add_argument("--change", required=True)  # Флоу 4: chore или kebab-slug
     ps.add_argument("--task")
     ps.add_argument("--action")   # dev_task/review_task/ops_task/...
     ps.add_argument("--role")

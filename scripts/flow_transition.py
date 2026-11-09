@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Callable
 
 import flow_check
+import flow_ids
 import flow_state
 
 DECISION_SCHEMA = "flow-decision/1"
@@ -109,7 +110,9 @@ EXTERNAL_DENY = "DENY"
 EXTERNAL_UNKNOWN = "UNKNOWN"
 
 # Защищенные пути конвейера (Флоу 4, J3 pm_bounds_check).
-PROTECTED_PATHS = ("openspec/", "contracts/", "AGENTS.md", "agents/README.md")
+PROTECTED_PATHS = ("openspec/", "contracts/", "AGENTS.md", "agents/README.md",
+                   "agents/roles.json",  # J65.1: реестр ролей — политика зон
+                   "test-model/test-layout.json")  # J66: строгость раскладки
 
 # Формат зависимостей в строке задачи tasks.md: «(после 1.1, 1.2)» / «depends: 1.1».
 DEPS_RE = re.compile(
@@ -367,18 +370,34 @@ def _plan_release(snapshot: dict, ctx: dict) -> list:
             "план релиза не проверяем: scope без repo/change — пересобери "
             "inspect (J41; контракт §2)")]
     paths = plan_release_paths(Path(repo), str(change_id), flow)
+    # J64.3: scope Флоу 4 (kebab-slug) совпадает по форме с change-id Флоу 1
+    # — план чужого флоу не закрывает план-ворота этого. Кандидаты
+    # перебираются все: чужой план в корне не перекрывает легитимный план
+    # своего флоу (openspec/changes/<id>/PLAN.md, test-model/bugs/PLAN.md).
+    found: list[tuple[Path, set[int]]] = []
     for path in paths:
         if not path.is_file():
             continue
         ctx["evidence"].add(str(path))
         text = path.read_text(encoding="utf-8", errors="replace")
-        if not PLAN_FLOW_RE.search(text):
-            return [Finding(
-                PLAN_FLOW_UNDECLARED,
-                f"план релиза {path.name} не объявляет воркфлоу — нужна строка "
-                f"«Флоу: N» (N 1–5, допускается **жирное**) (J41; правило "
-                f"фабрики: план фиксирует, по какой схеме релиз ведется)")]
-        return []
+        declared = {int(m) for m in PLAN_FLOW_RE.findall(text)}
+        if flow in declared:
+            return []
+        found.append((path, declared))
+    undeclared = [p for p, d in found if not d]
+    if undeclared:
+        return [Finding(
+            PLAN_FLOW_UNDECLARED,
+            f"план релиза {undeclared[0].name} не объявляет воркфлоу — нужна "
+            f"строка «Флоу: N» (N 1–5, допускается **жирное**) (J41; правило "
+            f"фабрики: план фиксирует, по какой схеме релиз ведется)")]
+    if found:
+        path, declared = found[0]
+        return [Finding(
+            PLAN_FLOW_UNDECLARED,
+            f"план релиза {path.name} объявляет Флоу "
+            f"{', '.join(map(str, sorted(declared)))}, запрошен Флоу {flow} — "
+            f"план чужого воркфлоу не закрывает ворота (J41; J64.3)")]
     return [Finding(
         PLAN_RELEASE_MISSING,
         f"план релиза не найден (Флоу {flow}): ни одного из: "
@@ -1682,11 +1701,10 @@ def check_emergency_stabilize(snapshot, action, ctx, flow):
 
 # I-1 ревью: severity-уровни — одним allowlist-множеством; новый уровень
 # (например S4) = одна правка + отдельный change-пакет (rules_change).
-SEVERITY_PREFIXES = ("S1", "S2", "S3")
-# MIN-1 ревью 4.1: regex ВЫВОДИТСЯ из тупла (захват группы для
-# incident_severity: m.group(1) → "S1"/"S2"/…), не дублируется литералом.
-SEVERITY_PREFIX_RE = re.compile(
-    "^(" + "|".join(re.escape(p) for p in SEVERITY_PREFIXES) + ")-")
+# J65.3: allowlist и выведенный из него regex (захват группы для
+# incident_severity) живут в flow_ids; здесь — имена для вызывающих.
+SEVERITY_PREFIXES = flow_ids.SEVERITY_PREFIXES
+SEVERITY_PREFIX_RE = flow_ids.SEVERITY_PREFIX_RE
 # D4: хранилище post-mortem — append-only, именование
 # <YYYY-MM-DD>-<incident_ref>.md; корреляция ворот — по вхождению incident_ref
 # в имя файла ПО ГРАНИЦАМ (начало имени или «-» … «.» или конец; MIN-2 ревью
@@ -1930,6 +1948,12 @@ STAGE_TABLE: dict[int, tuple[Stage, ...]] = {
     2: (
         Stage("bug_fix", ("dev",), False,
               ("pr_validate [BUG-NNN]",), check_bug_fix),
+        # J66 (решение Заказчика 2026-11-07, «Этап qa_automation»): dev пишет
+        # только tests/unit — регрессионный и адаптация приемочных тестов
+        # tests/api|web|integration — этап qa_automation; вход — тот же, что
+        # у первого этапа флоу (план + BUG-репорт).
+        Stage("qa_automation", ("qa_automation",), False,
+              ("flow_check (раскладка тестов J66)",), check_bug_fix),
         # Решение Заказчика 2026-10-07-code-review-flow2: независимое ревью
         # багфикса — до этого «написать ревью» во Флоу 2 было нечем
         # (accept_review требует уже существующий approve — замкнутый круг),
@@ -1946,6 +1970,12 @@ STAGE_TABLE: dict[int, tuple[Stage, ...]] = {
     3: (
         Stage("emergency_stabilize", ("dev", "devops"), False,
               ("pr_validate (последующий PR-цикл)",), check_emergency_stabilize),
+        # J66 (решение Заказчика 2026-11-07, «Этап qa_automation»): dev пишет
+        # только tests/unit — регрессионный и адаптация приемочных тестов
+        # tests/api|web|integration — этап qa_automation; вход — тот же, что
+        # у первого этапа флоу (incident_ref).
+        Stage("qa_automation", ("qa_automation",), False,
+              ("flow_check (раскладка тестов J66)",), check_emergency_stabilize),
         Stage("accept_review", ("code_reviewer",), False,
               ("provenance-блок (поставка 05)",), check_accept_review),
         Stage("merge_task", ("dev_lead", "integrator"), False,
@@ -1969,6 +1999,12 @@ STAGE_TABLE: dict[int, tuple[Stage, ...]] = {
     4: (
         Stage("chore_task", ("dev",), False,
               ("pr_validate check_chore", "pm_bounds_check (J3)"), check_chore_task),
+        # J66 (решение Заказчика 2026-11-07, «Этап qa_automation»): dev пишет
+        # только tests/unit — регрессионный и адаптация приемочных тестов
+        # tests/api|web|integration — этап qa_automation; вход — тот же, что
+        # у первого этапа флоу (план).
+        Stage("qa_automation", ("qa_automation",), False,
+              ("flow_check (раскладка тестов J66)",), check_chore_task),
         Stage("code_review", ("code_reviewer",), False,
               ("review-файл с вердиктом (agents/code_reviewer_agent.md)",),
               check_code_review),
@@ -1981,6 +2017,12 @@ STAGE_TABLE: dict[int, tuple[Stage, ...]] = {
     5: (
         Stage("express_task", ("dev",), False,
               ("pr_validate [change-id]",), check_express_task),
+        # J66 (решение Заказчика 2026-11-07, «Этап qa_automation»): dev пишет
+        # только tests/unit — регрессионный и адаптация приемочных тестов
+        # tests/api|web|integration — этап qa_automation; вход — тот же, что
+        # у первого этапа флоу (условия экспресса).
+        Stage("qa_automation", ("qa_automation",), False,
+              ("flow_check (раскладка тестов J66)",), check_express_task),
         Stage("express_close", ("pm",), False,
               ("flow_check", "openspec validate"), check_express_close),
     ),

@@ -24,9 +24,10 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+import factory_paths as fp  # noqa: E402  (J64.5: пути машины — только оттуда)
 
-STATE_DB = Path.home() / ".hermes/state.db"
-SESSIONS_JSON = Path.home() / ".hermes/sessions/sessions.json"
+STATE_DB = fp.hermes_home() / "state.db"
+SESSIONS_JSON = fp.hermes_home() / "sessions" / "sessions.json"
 DM_PREFIX = "agent:main:telegram:dm:"
 DRY_RUN = "--dry-run" in sys.argv
 
@@ -134,7 +135,7 @@ def heal() -> list[str]:
     # 2.75) незакрытые делегации: result готов, но delivery_state='dropped'
     #       (провал на границе сессии) — информативно для Заказчика.
     #       Каждый id предупреждаем один раз (state-файл), чтобы не спамить каждые 2 мин.
-    _SEEN = Path.home() / ".hermes/state/watchdog_dropped_seen.json"
+    _SEEN = fp.state_dir() / "watchdog_dropped_seen.json"
     try:
         seen: set[str] = set(json.loads(_SEEN.read_text()) if _SEEN.exists() else [])
     except (OSError, json.JSONDecodeError):

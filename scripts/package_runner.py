@@ -160,8 +160,15 @@ except (ImportError, RuntimeError) as _exc:  # нет движка/реестр�
 REPO_ROOT = SCRIPTS.parent
 ROLE_PACKS = REPO_ROOT / "skills" / "pm-factory" / "pi" / "role-packs"
 WORKTREE_SCRIPT = SCRIPTS / "session_worktree.sh"
-ZONE_GUARD = fp.pi_agent_dir() / "extensions" / "zone-guard.ts"
 FLOWCTL = Path(fc.__file__).resolve() if fc else SCRIPTS / "flowctl.py"
+# zone-guard исполнителя Pi (J64.10, решение Заказчика 2026-11-11 «Прямо из
+# репо»): эталон в репо движка (корень рядом с flowctl), не копия в ~/.pi;
+# pi запускается с --no-extensions, копия на стадии не грузится. Нет файла —
+# STOP стадии до ворот входа (раннер — FACTORY-ONLY; при запуске вне фабрики
+# без движка STOP дает FACTORY_ENGINE_MISSING).
+ZONE_GUARD_REL = Path("skills") / "pm-factory" / "pi" / "zone-guard.ts"
+ZONE_GUARD = FLOWCTL.parent.parent / ZONE_GUARD_REL
+ZONE_GUARD_MISSING = "ZONE_GUARD_MISSING"
 # Ворота pi-стадии: владелец резервации в реестре сессий и область finish.
 FLOW_OWNER = "package_runner"
 FLOW_GATE_SCOPE = "post_agent"
@@ -494,6 +501,24 @@ def parse_manifest(plan_path: Path) -> dict:
                 raise ManifestError(
                     f"{where}.{field}: ожидается непустая строка, "
                     f"получено: {val!r}")
+        per_task = raw.get("per_task")
+        if per_task is not None and not isinstance(per_task, bool):
+            raise ManifestError(f"{where}.per_task: ожидается true/false, "
+                                f"получено: {per_task!r}")
+        if per_task and (kind != "pi" or flow_role(payload) != "dev"
+                         or raw.get("task_id") or verdict is not None
+                         or raw.get("optional")):
+            # J64.13: развертка по задачам tasks.md — только pi:dev без своего
+            # task_id, verdict и optional (ревью — парными под-стадиями).
+            raise ManifestError(
+                f"{where}.per_task: только для pi:dev без task_id, verdict и optional")
+        review_role = raw.get("review")
+        if review_role is not None and not (
+                per_task and isinstance(review_role, str)
+                and ROLE_RE.fullmatch(review_role.strip())):
+            raise ManifestError(
+                f"{where}.review: роль-пак ревьюера (например code-reviewer) — "
+                "только вместе с per_task: true")
         optional = raw.get("optional")
         if optional is not None and not isinstance(optional, bool):
             # Опциональная стадия (J62-остаток): отказ pi/gate/verdict —
@@ -519,6 +544,8 @@ def parse_manifest(plan_path: Path) -> dict:
             "action": (raw.get("action") or "").strip(),
             "task_id": (raw.get("task_id") or "").strip(),
             "approval_ref": (raw.get("approval_ref") or "").strip(),
+            "per_task": bool(per_task),
+            "review": (review_role or "").strip(),
         }
         stages.append(stage)
     strip = pipe.get("gate_env_strip")
@@ -601,6 +628,53 @@ def check_verdict(worktree: Path, verdict: dict,
     return value, None
 
 
+STAMP_MARK = "<!-- штамп package_runner, J65.4b -->"
+REVIEWER_DELEGATION_RE = re.compile(
+    r"Reviewer-Delegation[^A-Za-z0-9]{0,6}(deleg[-_][A-Za-z0-9]+)", re.I)
+
+
+def stamp_reviewer_delegation(review_file: Path, delegation_id: str) -> bool:
+    """J65.4b: строка `Reviewer-Delegation: <делегация стадии>` в review-файле
+    стадии Pi — доказательство независимости для pr_validate (J10). Ревьюер
+    свою делегацию не знает, поэтому штамп ставит раннер после приемки
+    стадии и до коммита.
+
+    Строки со штампом раннера (метка STAMP_MARK) принадлежат раннеру:
+    каждая попытка стадии получает новую делегацию, поэтому штамп прошлой
+    попытки (return → resume) заменяется текущим — иначе pr_validate взял бы
+    первое совпадение, устаревшую делегацию. Строка Reviewer-Delegation БЕЗ
+    метки (вписал ревьюер или кто-то еще) с другой делегацией — RunnerStop
+    (подмена). Итог: ровно один штамп текущей делегации. Возврат — изменился
+    ли файл. Файла нет — без изменений: отсутствие вердикта ловят
+    вердикт-ворота."""
+    if not review_file.is_file():
+        return False
+    text = review_file.read_text(encoding="utf-8")
+    stamp = f"Reviewer-Delegation: {delegation_id}  {STAMP_MARK}"
+    kept = [ln for ln in text.splitlines(keepends=True) if STAMP_MARK not in ln]
+    for ln in kept:
+        m = REVIEWER_DELEGATION_RE.search(ln)
+        if m and m.group(1).replace("_", "-") != delegation_id.replace("_", "-"):
+            raise RunnerStop(
+                f"{review_file.name}: Reviewer-Delegation {m.group(1)} не "
+                f"совпадает с делегацией стадии {delegation_id} — подмена "
+                "доказательства независимости (J65.4b); строку пишет только "
+                "раннер")
+    if any(REVIEWER_DELEGATION_RE.search(ln) for ln in kept):
+        new = "".join(kept)           # ревьюер вписал верную делегацию сам
+        if new != text:
+            review_file.write_text(new, encoding="utf-8")
+        return new != text
+    lines = kept
+    at = 1 if lines and lines[0].startswith("#") else 0
+    lines.insert(at, stamp + "\n")
+    new = "".join(lines)
+    if new == text:
+        return False
+    review_file.write_text(new, encoding="utf-8")
+    return True
+
+
 def record_review_provenance(plan_path: Path, worktree: Path, manifest: dict,
                              stage: dict, state: dict, gate: dict,
                              verdict: str) -> str:
@@ -612,8 +686,9 @@ def record_review_provenance(plan_path: Path, worktree: Path, manifest: dict,
     — делегации pi-стадий других ролей с коммитом после предыдущей
     review-стадии. Рядом с review-файлом sidecar НЕ кладется: его читает
     flow_transition (provenance_findings) и J10 со своей семантикой
-    (`HEAD^..HEAD`, задача tasks.md, Reviewer-Delegation из реестра Hermes);
-    интеграция ревью стадий Pi с этими воротами — отдельная задача.
+    (`HEAD^..HEAD`, задача tasks.md, Reviewer-Delegation). Независимость
+    ревью стадии для J10 доказывает штамп `Reviewer-Delegation`
+    (stamp_reviewer_delegation) + запись цикла flowctl раннера (J65.4b).
     Возвращает путь записи или бросает RunnerStop."""
     if gr is None:
         raise RunnerStop(f"provenance ревью: движок фабрики недоступен "
@@ -664,6 +739,139 @@ def repo_of_name(worktree: Path) -> str:
             path = (worktree / path).resolve()
         return path.parent.name
     return worktree.name
+
+
+DEV_SKIP_TAGS = {"ops", "docs", "design"}
+
+
+def per_task_ids(worktree: Path, package: str) -> list[str]:
+    """J64.13: открытые dev-задачи tasks.md пакета в порядке зависимостей.
+
+    Берутся задачи `- [ ] N.M …` из openspec/changes/<package>/tasks.md
+    (worktree пакета — tasks.md мог создать SA этим же прогоном), кроме
+    QA-раздела (flow_check.QA_SECTION) и задач с метками [ops]/[docs]/
+    [design] (не dev — свои этапы). Порядок — топологический по
+    «(после N.M)» / «depends:» (flow_transition), при равенстве — порядок
+    файла. Зависимость на закрытую задачу — норма; на открытую не-dev или
+    несуществующую — RunnerStop сразу (ворота dev_task отказали бы посреди
+    пакета); цикл или отсутствие tasks.md — RunnerStop."""
+    tasks = worktree / "openspec" / "changes" / package / "tasks.md"
+    if not tasks.is_file():
+        raise RunnerStop(f"per_task: нет {tasks.relative_to(worktree)} — "
+                         "развертка dev по задачам невозможна (J64.13)")
+    if ft is None:
+        raise RunnerStop(f"per_task: движок фабрики недоступен ({ENGINE_ERROR})")
+    text = tasks.read_text(encoding="utf-8", errors="replace")
+    meta = ft._task_lines(text)
+    order = []
+    for tid, info in meta.items():
+        line = info.get("title", "")
+        tags = set(re.findall(r"\[([A-Za-z]+)\]", line))
+        if (info.get("closed") or tid.split(".")[0] == flow_check.QA_SECTION
+                or tags & DEV_SKIP_TAGS):
+            continue
+        order.append(tid)
+    bad = []
+    for t in order:
+        for d in meta[t].get("deps", []):
+            if d in order:
+                continue
+            if d not in meta:
+                bad.append(f"{t} → {d} (нет в tasks.md)")
+            elif not meta[d].get("closed"):
+                bad.append(f"{t} → {d} (открытая не-dev задача)")
+    if bad:
+        # ворота dev_task требуют закрытую зависимость с approve-ревью —
+        # раннер остановился бы посреди пакета; STOP сразу
+        raise RunnerStop("per_task: зависимости вне развертки не закрыты: "
+                         + "; ".join(bad))
+    pending = {t: [d for d in meta[t].get("deps", []) if d in order] for t in order}
+    out: list[str] = []
+    while pending:
+        ready = [t for t in order if t in pending
+                 and all(d in out for d in pending[t])]
+        if not ready:
+            raise RunnerStop("per_task: цикл зависимостей задач tasks.md: "
+                             + ", ".join(sorted(pending)))
+        out.append(ready[0])
+        del pending[ready[0]]
+    return out
+
+
+def task_checkbox(worktree: Path, package: str, task_id: str) -> str:
+    """Статус чекбокса задачи tasks.md: open | closed | missing."""
+    tasks = worktree / "openspec" / "changes" / package / "tasks.md"
+    try:
+        text = tasks.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "missing"
+    m = re.search(rf"^[-*]\s*\[( |x)\]\s*{re.escape(task_id)}(?![\d.])", text, re.M)
+    return "missing" if not m else ("closed" if m.group(1) == "x" else "open")
+
+
+def close_task_checkbox(worktree: Path, package: str, task_id: str,
+                        message: str) -> str | None:
+    """`- [ ] N` → `- [x] N` в tasks.md пакета и коммит; уже закрыта — None."""
+    tasks = worktree / "openspec" / "changes" / package / "tasks.md"
+    rel = tasks.relative_to(worktree).as_posix()
+    text = tasks.read_text(encoding="utf-8")
+    new, n = re.subn(rf"^([-*]\s*)\[ \](\s*{re.escape(task_id)}(?![\d.]))",
+                     r"\1[x]\2", text, count=1, flags=re.M)
+    if n == 0:
+        if task_checkbox(worktree, package, task_id) == "closed":
+            return None
+        raise RunnerStop(f"чекбокс задачи {task_id} не найден в {rel}")
+    tasks.write_text(new, encoding="utf-8")
+    for cmd in (["add", "--", rel], ["commit", "-q", "-m", message, "--", rel]):
+        r = subprocess.run(["git", "-C", str(worktree), *cmd],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RunnerStop(f"чекбокс задачи {task_id} не закоммичен: "
+                             f"{(r.stderr or r.stdout).strip()}")
+    return _git_head(worktree)
+
+
+def expand_per_task(stage: dict, task_ids: list[str],
+                    deps: dict[str, list[str]], package: str) -> list[dict]:
+    """Под-стадии `<id>-<задача>`: копия pi:dev с task_id (flowctl prepare
+    --task: ворота dev_task по задаче). С `review:` — следом пара
+    `<id>-<задача>-review` (этап code_review по задаче, вердикт
+    `code-reviews/<package>/review-<задача>-001.md`): ворота dev_task
+    следующей задачи требуют approve-ревью ее зависимостей (J10).
+    depends — под-стадии зависимостей (ревью, если оно есть)."""
+    subs = []
+    review = stage.get("review") or ""
+    last = {}
+    for tid in task_ids:
+        dev = dict(stage, id=f"{stage['id']}-{tid}", task_id=tid, per_task=False,
+                   review="", depends=[last[d] for d in deps.get(tid, []) if d in last])
+        dev["task"] = (stage.get("task") or "") + f" [задача tasks.md {tid}]"
+        if review:
+            # Решение Заказчика 2026-11-11 (J64.13): чекбокс задачи ставит
+            # раннер после approve ревью — ревью по открытой задаче (code_review
+            # Флоу 1), следующая задача видит закрытую одобренную зависимость.
+            dev["per_task_dev"] = tid
+            dev["task"] += (f". НЕ закрывай чекбокс задачи {tid} в tasks.md — "
+                            "его ставит раннер после approve ревью (J64.13)")
+        subs.append(dev)
+        last[tid] = dev["id"]
+        if review:
+            rev = {
+                "id": f"{stage['id']}-{tid}-review", "kind": "pi",
+                "payload": review, "zones": policy_zones(review, package),
+                "inputs": [], "description": "",
+                "task": (f"ревью задачи tasks.md {tid} (дифф под-стадии {dev['id']}); "
+                         "повторная итерация — дописать в конец того же файла "
+                         "(история append-only, решает последний заголовок вердикта)"),
+                "per_task_review": tid,
+                "gate": "", "depends": [dev["id"]],
+                "verdict": {"file": f"code-reviews/{package}/review-{tid}-001.md"},
+                "optional": False, "action": "code_review", "task_id": tid,
+                "approval_ref": "", "per_task": False, "review": "",
+            }
+            subs.append(rev)
+            last[tid] = rev["id"]
+    return subs
 
 
 def sequence_warnings(stages: list[dict]) -> list[str]:
@@ -773,6 +981,27 @@ def repo_of(plan_path: Path) -> Path:
     return Path(proc.stdout.strip())
 
 
+PACKAGE_MARKER = "package-runner.json"
+
+
+def write_package_marker(worktree: Path, plan_path: Path, spath: Path) -> None:
+    """J64.14: маркер пакета раннера в git-dir worktree (в коммит не идет):
+    `flowctl gc` не сносит worktree, пока state пакета без finished_at —
+    сессии стадий (released/closed) указывают на общий worktree пакета."""
+    r = subprocess.run(["git", "-C", str(worktree), "rev-parse",
+                        "--path-format=absolute", "--git-dir"],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return
+    try:
+        (Path(r.stdout.strip()) / PACKAGE_MARKER).write_text(json.dumps(
+            {"plan": str(plan_path), "state": str(spath)}, ensure_ascii=False),
+            encoding="utf-8")
+    except OSError as exc:
+        print(f"RUNNER-WARNING: маркер пакета не записан ({exc}) — gc не "
+              "увидит незавершенный пакет", file=sys.stderr)
+
+
 def ensure_worktree(repo: Path, session_id: str, branch: str) -> Path:
     """Worktree сессии через session_worktree.sh (E5); уже существует —
     переиспользуется (resume/idempotency). База — текущий HEAD репо:
@@ -855,6 +1084,64 @@ def gate_env(stand_env: dict | None = None) -> dict:
     if stand_env:
         env.update(stand_env)
     return env
+
+
+def worktree_dirty(worktree: Path) -> set[str]:
+    """Измененные и неотслеживаемые пути worktree (git status -z: имена как
+    есть, без экранирования; .gitignore учитывается; COMMIT_EXCLUDE — нет)."""
+    r = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain",
+                        "-z", "--untracked-files=all"], capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        return set()
+    out: set[str] = set()
+    items = r.stdout.split("\0")
+    i = 0
+    while i < len(items):
+        entry = items[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        if status[0] in "RC":     # переименование: следом — исходное имя
+            i += 1
+        if path and Path(path).name not in COMMIT_EXCLUDE:
+            out.add(path)
+    return out
+
+
+def runner_leftovers(worktree: Path, plan_path: Path,
+                     own: set[str] = frozenset(),
+                     before: set[str] = frozenset()) -> list[str]:
+    """Изменения worktree от стадии: новые относительно `before` (снимок до
+    стадии); собственные артефакты раннера (план с журналом, state, лог,
+    каталог отчетов) и `own` (файл вердикта стадии) исключаются."""
+    names = {plan_path.name, plan_path.name + ".runner-state.json",
+             plan_path.name + LOG_SUFFIX}
+    reports = plan_path.name + REPORTS_SUFFIX
+    out = []
+    for p in worktree_dirty(worktree):
+        parts = Path(p).parts
+        if p in own or p in before or Path(p).name in names or reports in parts:
+            continue
+        out.append(p)
+    return sorted(out)
+
+
+def stage_dirty_before(state: dict, stage_id: str, worktree: Path) -> set[str]:
+    """Снимок изменений до gate/stand-стадии. Файлы, которые эта же стадия
+    оставила в прошлой попытке (state.gate_leftovers), из снимка вычитаются:
+    resume после STOP не пропускает их как «бывшие до стадии». Запись
+    очищается только при успехе стадии (отказ по другой причине ее хранит)."""
+    prev = set((state.get("gate_leftovers") or {}).get(stage_id, []) or [])
+    return worktree_dirty(worktree) - prev
+
+
+def leftovers_detail(kind: str, paths: list[str]) -> str:
+    shown = ", ".join(paths[:10]) + (f" … (+{len(paths) - 10})" if len(paths) > 10 else "")
+    return (f"{kind}-стадия оставила изменения в worktree: {shown} — "
+            "следующая pi-стадия получила бы их в дифф (OUT_OF_ZONE); "
+            "убери их в самой команде или добавь в .gitignore проекта (J64.14)")
 
 
 def run_shell(cmd: str, cwd: Path, timeout: int,
@@ -1168,6 +1455,36 @@ def gate_end(gate: dict, worktree: Path, report: Path) -> tuple[bool, str]:
     return False, f"flowctl finish: {_flowctl_reason(payload, err)}"
 
 
+REJECTED_AFTER_ACCEPT = "rejected_after_accept"
+
+
+def mark_rejected_after_accept(gate: dict, detail: str,
+                               registry: bool = True) -> None:
+    """J64.14: стадия получила finish accepted, но коммит не состоялся
+    (recheck зоны/сбой коммита): запись цикла flowctl → rejected_after_accept
+    (не засчитывается ни фазой, ни J10), резервация finished →
+    needs_attention (зона держится до решения ПМ)."""
+    if registry:   # optional-стадия освобождает зону сама (gate_abandon)
+        _transition(Path(gate["registry"]), gate["delegation_id"],
+                    "needs_attention", f"package_runner: {detail}",
+                    "отказ после finish accepted", expect_from="finished")
+    if gate.get("kind") != "flowctl":
+        return
+
+    def _mark(st: dict) -> None:
+        rec = st.get("runs", {}).get(gate["cid"])
+        if rec is not None:
+            rec["status"] = REJECTED_AFTER_ACCEPT
+            rec["rejected_after_accept"] = {"at": utcnow_iso(), "reason": detail}
+
+    try:
+        fc.state_write_locked(Path(gate["state"]),
+                              fc.state_load(Path(gate["state"])), _mark)
+    except OSError as exc:
+        print(f"RUNNER-WARNING: запись flowctl {gate['cid']} не помечена "
+              f"{REJECTED_AFTER_ACCEPT}: {exc}", file=sys.stderr)
+
+
 def gate_close(gate: dict, commit: str | None) -> None:
     """Принятая и закоммиченная стадия освобождает зону (finished → closed);
     запись цикла flowctl получает пометку раннера (коммит, отложенный
@@ -1283,15 +1600,28 @@ def shelve_attempt(worktree: Path, base_sha: str, label: str) -> str:
     return "изменений нет" if "No local changes" in out else f"stash «{label}»"
 
 
+def zone_guard_log(package: str) -> Path:
+    """Лог отказов zone-guard — вне worktree (J64.10): в дифф стадии не
+    попадает и не путается с работой агента."""
+    return fp.state_dir() / "zone-guard" / f"{package}.log"
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def write_report(plan_path: Path, stage: dict, attempt: int,
-                 stdout: str, stderr: str) -> Path:
+                 stdout: str, stderr: str, guard_sha: str = "") -> Path:
     """Отчет агента для finish (указатель на файлы — хвост вывода pi)."""
     rdir = plan_path.with_name(plan_path.name + REPORTS_SUFFIX)
     rdir.mkdir(parents=True, exist_ok=True)
     path = rdir / f"{stage['id']}-{attempt}.md"
     path.write_text(
         f"# Отчет pi:{stage['payload']} — stage {stage['id']} "
-        f"(попытка {attempt})\n\n## stdout\n\n```\n"
+        f"(попытка {attempt})\n\n"
+        + (f"zone-guard: {ZONE_GUARD_REL.as_posix()} sha256 {guard_sha}\n\n"
+           if guard_sha else "")
+        + "## stdout\n\n```\n"
         f"{tail(stdout, STAGE_TAIL_LINES)}\n```\n\n## stderr\n\n```\n"
         f"{tail(stderr, STAGE_TAIL_LINES)}\n```\n", encoding="utf-8")
     return path
@@ -1404,6 +1734,10 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
     print(f"RUNNER: state: {spath}")
     done = {sid for sid, rec in state.get("stages", {}).items()
             if rec.get("status") in ("done", "waited", "skipped")}
+    # J64.14: прогон идет — пакет не докатан (gc не снесет worktree, пока
+    # повторный прогон не дойдет до конца).
+    if state.pop("finished_at", None):
+        state_write(spath, state)
     # Env стенда stand-стадий пакета (J62): живет в state — resume докатывает
     # пакет с тем же env (stand-стадия не переисполняется, она done).
     stand_env: dict[str, str] = dict(state.get("stand_env") or {})
@@ -1451,8 +1785,58 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             return _stop(stage, str(exc), None)
         state["worktree"] = str(worktree)
         state["branch"] = branch
+        write_package_marker(worktree, plan_path, spath)
+
+        if stage.get("per_task"):
+            # J64.13: одна задача tasks.md = одна pi-сессия (правило 11, J31).
+            # Список задач фиксируется в state при первой развертке: resume
+            # идет по тому же списку (под-стадии, уже done, пропускаются).
+            if ft is None:
+                return _stop(stage, f"per_task: движок фабрики недоступен "
+                             f"({ENGINE_ERROR})", None)
+            expanded = state.setdefault("expanded", {})
+            try:
+                ids = expanded.get(stage["id"]) or per_task_ids(
+                    worktree, manifest["package"])
+            except RunnerStop as exc:
+                return _stop(stage, str(exc), None)
+            if not ids:
+                return _stop(stage, "per_task: в tasks.md нет открытых dev-задач",
+                             None)
+            expanded[stage["id"]] = ids
+            try:
+                meta = ft._task_lines((worktree / "openspec" / "changes"
+                                       / manifest["package"] / "tasks.md").read_text(
+                    encoding="utf-8", errors="replace"))
+            except OSError as exc:
+                return _stop(stage, f"per_task: tasks.md не читается ({exc})", None)
+            deps = {t: [d for d in meta.get(t, {}).get("deps", []) if d in ids]
+                    for t in ids}
+            if not stage.get("review") and any(deps.values()):
+                return _stop(stage, "per_task: задачи зависят друг от друга, а "
+                             "review: не задан — ворота dev_task требуют "
+                             "approve-ревью зависимостей (J10); добавь `review: "
+                             "code-reviewer` стадии", None)
+            subs = expand_per_task(stage, ids, deps, manifest["package"])
+            empty = [s["id"] for s in subs if s["kind"] == "pi" and not s["zones"]]
+            if empty:
+                return _stop(stage, "per_task: у роли ревьюера нет зоны в реестре "
+                             "agents/roles.json: " + ", ".join(empty), None)
+            clash = {s["id"] for s in subs} & {s["id"] for s in manifest["stages"]}
+            if clash:
+                return _stop(stage, "per_task: id под-стадий совпадают со "
+                             "стадиями манифеста: " + ", ".join(sorted(clash)), None)
+            at = manifest["stages"].index(stage)
+            manifest["stages"][at + 1:at + 1] = subs
+            state_record(state, stage["id"], "expanded",
+                         "per_task: " + ", ".join(ids))
+            state_write(spath, state)
+            print(f"RUNNER: stage {stage['id']} — развернута по задачам "
+                  f"tasks.md: {', '.join(s['id'] for s in subs)}")
+            continue
 
         if stage["kind"] == "gate":
+            dirty_before = stage_dirty_before(state, stage["id"], worktree)
             try:
                 rc, out, err = run_shell(stage["payload"], worktree, timeout,
                                          stand_env=stand_env)
@@ -1467,6 +1851,16 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 if _fail(stage, f"gate exit {rc}", rc, out, err):
                     return EXIT_STOP
                 continue
+            own = {stage["verdict"]["file"]} if stage["verdict"] else set()
+            left = runner_leftovers(worktree, plan_path, own, dirty_before)
+            if left:
+                state.setdefault("gate_leftovers", {})[stage["id"]] = left
+                # J64.14: файлы gate-стадии (кроме ее файла вердикта) (без ворот зоны) иначе попадут в
+                # дифф следующей pi-стадии и уронят ее чужим OUT_OF_ZONE.
+                if _fail(stage, leftovers_detail("gate", left), 0, out, err):
+                    return EXIT_STOP
+                continue
+            (state.get("gate_leftovers") or {}).pop(stage["id"], None)
             state_record(state, stage["id"], "done", "gate ok", 0, out, err)
             state_write(spath, state)
             try:
@@ -1489,6 +1883,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             # (формат scripts/qa_stand_up.sh) — иначе STOP: без env стенда
             # последующие стадии гарантированно красные, молчаливый проход
             # только переносил бы отказ глубже.
+            dirty_before = stage_dirty_before(state, stage["id"], worktree)
             try:
                 rc, out, err = run_shell(stage["payload"], worktree, timeout)
             except subprocess.TimeoutExpired as exc:
@@ -1502,6 +1897,11 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 return _stop(stage, "stand: в stdout нет export VAR=value "
                              "(стенд не отчитался env — формат "
                              "scripts/qa_stand_up.sh)", rc, out, err)
+            left = runner_leftovers(worktree, plan_path, before=dirty_before)
+            if left:
+                state.setdefault("gate_leftovers", {})[stage["id"]] = left
+                return _stop(stage, leftovers_detail("stand", left), rc, out, err)
+            (state.get("gate_leftovers") or {}).pop(stage["id"], None)
             stand_env.update(parsed)
             state["stand_env"] = dict(stand_env)
             exported = ", ".join(sorted(parsed))
@@ -1523,6 +1923,19 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             done.add(stage["id"])
             continue
 
+        if stage.get("per_task_review") and stage.get("verdict") and task_checkbox(
+                worktree, manifest["package"], stage["per_task_review"]) == "closed":
+            # J64.13: раннер уже закрыл чекбокс после approve этой пары (сбой
+            # до отметки done) — повтор ревью по закрытой задаче ворота не
+            # примут; вердикт файла — approve → стадия done без повтора.
+            value, problem = check_verdict(worktree, stage["verdict"])
+            if value == "approve" and not problem:
+                state_record(state, stage["id"], "done",
+                             "approve и чекбокс уже зафиксированы (resume)")
+                state_write(spath, state)
+                done.add(stage["id"])
+                continue
+
         # kind == pi: роль-пак → AGENTS.md в корень worktree (а если там
         # уже есть AGENTS.md проекта — рядом как AGENTS.pi.md, проектные
         # правила не затираются; дефект пилота BUG-026), вызов pi.
@@ -1531,6 +1944,13 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         if not role_agents.is_file():
             return _stop(stage, f"роль-пак не найден: {role_agents}", None)
         role_text = role_agents.read_text(encoding="utf-8")
+        guard_sha = ""
+        if fc is not None:   # без движка STOP даст gate_new (FACTORY_ENGINE_MISSING)
+            if not ZONE_GUARD.is_file():
+                return _stop(stage, f"{ZONE_GUARD_MISSING}: zone-guard не найден "
+                                    f"({ZONE_GUARD}) — pi без guard'а роли не "
+                                    "запускается (J64.10)", None)
+            guard_sha = file_sha256(ZONE_GUARD)
 
         # Ворота входа (flowctl prepare/run или резервация зоны роли без
         # этапа). Повтор стадии после STOP сначала освобождает зону своей
@@ -1544,6 +1964,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         try:
             gate = gate_new(stage, repo, worktree)
             gate.update(open=True, attempt=attempt)
+            if guard_sha:   # аудит: какой guard стоял на попытке (J64.10)
+                gate["zone_guard_sha256"] = guard_sha
             gates[stage["id"]] = gate
             state_write(spath, state)  # до prepare: резервация не осиротеет
             gate_begin(manifest, stage, repo, worktree, branch, gate)
@@ -1576,6 +1998,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                     return _stop(stage, f"{detail}; {exc}", exit_code,
                                  stdout, stderr)
                 gate["shelved"] = shelf
+                if gate.get("accepted"):
+                    mark_rejected_after_accept(gate, detail, registry=False)
                 gate_abandon(gate, f"optional skipped: {detail}")
                 gate["open"] = False
                 detail = f"{detail}; изменения попытки: {shelf}"
@@ -1585,6 +2009,11 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                     Path(gate["registry"]), gate["delegation_id"],
                     "needs_attention", f"package_runner: {detail}",
                     "STOP раннера", expect_from="running")
+            elif gate.get("accepted"):
+                # J64.14: отказ ПОСЛЕ finish accepted (recheck зоны, сбой
+                # коммита) — запись цикла не остается «accepted» без коммита,
+                # зона держится до разбора ПМ.
+                mark_rejected_after_accept(gate, detail)
             state_write(spath, state)
             return _fail(stage, detail, exit_code, stdout, stderr)
 
@@ -1608,10 +2037,17 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         # дефект пилота BUG-026 — guard матчит префиксом, не glob'ом).
         env["PI_ZONE_WRITE"] = ":".join(
             normalize_zone(z) for z in stage["zones"])
+        # Роль — bash-правила guard'а (docker-мутации — только devops);
+        # лог отказов — вне worktree (J64.10).
+        env["PI_ZONE_ROLE"] = flow_role(stage["payload"])
+        env["PI_ZONE_GUARD_LOG"] = str(zone_guard_log(manifest["package"]))
         # Env стенда stand-стадий пакета (J62) — всем последующим pi-стадиям.
         env.update(stand_env)
         args = ["pi", "--provider", provider, "--model", model,
-                "--no-session", "-e", str(ZONE_GUARD),
+                # --no-extensions: автозагрузка расширений (~/.pi/agent/
+                # extensions, .pi/ проекта, settings.json) выключена — на
+                # стадии действует только эталон guard'а (ревью J64.10)
+                "--no-session", "--no-extensions", "-e", str(ZONE_GUARD),
                 "-p", build_brief(manifest, stage, agents_file.name)]
         try:
             rc, out, err = run_pi(args, worktree, env, timeout)
@@ -1646,12 +2082,22 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         # Ворота выхода: дифф ⊆ зона + гейты этапа, затем коммит стадии в
         # ветку пакета и закрытие резервации.
         try:
-            report = write_report(plan_path, stage, attempt, out, err)
+            report = write_report(plan_path, stage, attempt, out, err,
+                                  gate.get("zone_guard_sha256", ""))
         except OSError as exc:
             if _reject(f"отчет стадии не записан: {exc}", None, out, err):
                 return EXIT_STOP
             continue
+        if stage.get("per_task_dev") and task_checkbox(
+                worktree, manifest["package"], stage["per_task_dev"]) == "closed":
+            # до ворот выхода: запись цикла не становится accepted
+            if _reject(f"dev закрыл чекбокс задачи {stage['per_task_dev']} сам "
+                       "— при per_task с review его ставит раннер после approve "
+                       "(J64.13); открой чекбокс и повтори", None, out, err):
+                return EXIT_STOP
+            continue
         accepted, detail = gate_end(gate, worktree, report)
+        gate["accepted"] = bool(accepted)
         if not accepted:
             if _reject(f"ворота выхода: {detail}", None, out, err):
                 return EXIT_STOP
@@ -1662,6 +2108,16 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                        + ", ".join(outside), None, out, err):
                 return EXIT_STOP
             continue
+        if stage["verdict"]:
+            # J65.4b: штамп независимости ревью — делегация стадии в
+            # review-файле (pr_validate J10 сверяет ее с реестром раннера).
+            try:
+                stamp_reviewer_delegation(
+                    worktree / stage["verdict"]["file"], gate["delegation_id"])
+            except RunnerStop as exc:
+                if _reject(str(exc), None, out, err):
+                    return EXIT_STOP
+                continue
         try:
             commit = commit_stage(
                 worktree, f"[pipeline] {manifest['package']}/{stage['id']}: "
@@ -1672,6 +2128,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             continue
         gate_close(gate, commit)
         gate.update(open=False, commit=commit)
+
         # Вердикт-ворота (J62 → J65.4) ДО отметки done: вердикт файла — по
         # единому парсеру; approve/return фиксируется аудит-записью provenance
         # (прерывание между ними не оставит done-стадию без записи);
@@ -1696,6 +2153,18 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                          None):
                     return EXIT_STOP
                 continue
+        if stage.get("per_task_review"):
+            # approve пары (verdict_problem пуст) → чекбокс задачи закрывает
+            # раннер своим коммитом (решение Заказчика 2026-11-11, J64.13)
+            try:
+                closed_commit = close_task_checkbox(
+                    worktree, manifest["package"], stage["per_task_review"],
+                    f"[pipeline] {manifest['package']}/{stage['id']}: задача "
+                    f"{stage['per_task_review']} закрыта после approve ревью")
+            except RunnerStop as exc:
+                return _stop(stage, str(exc), None)
+            print(f"RUNNER: задача {stage['per_task_review']} закрыта в tasks.md "
+                  f"({closed_commit or 'уже закрыта'})")
         state_record(state, stage["id"], "done", "pi ok", 0, out, err)
         state_write(spath, state)
         try:
@@ -1706,6 +2175,9 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                        f"pi:{stage['payload']} | ok")
         done.add(stage["id"])
 
+    # J64.14: пакет докатан — gc может снести worktree (маркер пакета).
+    state["finished_at"] = utcnow_iso()
+    state_write(spath, state)
     print(f"RUNNER: пакет {manifest['package']} докатан "
           f"({len(manifest['stages'])} stage); state: {spath}")
     if any(s["kind"] == "stand" for s in manifest["stages"]):

@@ -32,6 +32,7 @@ ZONE_POLICY_MISMATCH.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -113,48 +114,44 @@ def _concrete(path: str) -> bool:
 def _pattern_lang_subset(sub: str, sup: str) -> bool:
     """Язык glob-паттерна sub ⊆ языка sup (по сегментной структуре).
 
-    Грубая, но КОНСЕРВАТИВНАЯ проверка (в сторону отказа): фиксированные
-    сегменты sub должны покрываться сегментами sup по позициям структуры
-    (lit↔lit, lit↔glob в соответствующем ролевом ранге, glob↔glob),
-    '**'-хвост sub допускается только при '**'-хвосте sup. Не распознает
-    все случаи (например 'a/x*' ⊆ 'a/*y') — тогда отказ: запрос сужается
-    жестче, чем мог бы, но никогда не расширяется.
+    Грубая, но КОНСЕРВАТИВНАЯ проверка (в сторону отказа), посегментно слева:
+      - литерал sub против литерала sup — равенство; против glob-сегмента sup
+        — fnmatchcase (та же семантика сегмента, что session_check.glob_matches);
+      - glob-сегмент sub — только против того же сегмента sup (J65.10:
+        `code-reviews/x/review-*.md` ⊆ `code-reviews/*/review-*.md`);
+      - '**' sup поглощает остаток sub только последним сегментом; '**' в
+        середине sup — отказ (число поглощаемых сегментов не доказать);
+      - '**' sub — только против '**'-хвоста sup;
+      - sub кончился — покрыт, только если кончился и sup (`code-reviews/*`
+        НЕ ⊆ `code-reviews/*/review-*.md`; ревью J65.10 review-001).
+    Не распознает все случаи (например 'a/x*' ⊆ 'a/*y') — тогда отказ:
+    запрос сужается жестче, чем мог бы, но никогда не расширяется.
+    Свойство держит тест TC-J65-REF-006 (перебор против glob_matches).
     """
     sub_segs, sup_segs = sub.split("/"), sup.split("/")
-    if "**" in sub_segs and "**" not in sup_segs:
-        return False
-    # Сопоставление слева: фиксированные сегменты sub против «ролевых» рангов
-    # sup (0 = литерал каталога/файла, 1 = '*', 2 = '**'). '**' в sup
-    # «поглощает» все оставшиеся сегменты sub.
-    rank = {"lit": 0, "star": 1, "dstar": 2}
 
-    def seg_rank(s: str) -> str:
-        if s == "**":
-            return "dstar"
-        if any(ch in s for ch in "*?["):
-            return "star"
-        return "lit"
+    def is_glob(seg: str) -> bool:
+        return any(ch in seg for ch in "*?[")
 
-    i = j = 0
-    while i < len(sub_segs):
+    j = 0
+    for ssub in sub_segs:
         if j >= len(sup_segs):
             return False  # sub длиннее: не покрыто
-        ssub, ssup = sub_segs[i], sup_segs[j]
-        rsub, rsup = seg_rank(ssub), seg_rank(ssup)
-        if rsup == "dstar":
-            return True  # '**' поглощает весь остаток sub
-        if rsub == "dstar":
-            return False  # '**' в sub при не-'**' сегменте sup — расширение
-        if rsub == "lit" and rsup == "lit":
+        ssup = sup_segs[j]
+        if ssup == "**":
+            return j == len(sup_segs) - 1  # хвост '**' поглощает остаток sub
+        if ssub == "**":
+            return False  # '**' sub против не-'**' сегмента sup — расширение
+        if is_glob(ssub):
             if ssub != ssup:
+                return False  # glob против иного сегмента — консервативный отказ
+        elif is_glob(ssup):
+            if not fnmatch.fnmatchcase(ssub, ssup):
                 return False
-        elif rsub == "lit" and rsup == "star":
-            pass  # '*' покрывает один литеральный сегмент
-        else:  # glob в sub против glob/lit в sup — консервативный отказ
+        elif ssub != ssup:
             return False
-        i += 1
         j += 1
-    return True
+    return j == len(sup_segs)
 
 
 def _allowed_superset(zone: str, allowed: tuple[str, ...]) -> bool:

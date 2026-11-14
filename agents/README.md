@@ -1,8 +1,8 @@
-<!-- factory-version: 959300ecc0fd -->
-
 # Агенты конвейера — реестр, вход/выход, назначение
 
 > Каждый файл в этой папке — **системный промпт** сабагента: подается целиком как системное сообщение при запуске на задаче. Здесь: кто эти агенты, что делают, зачем нужны, что принимают и отдают. Общий процесс — [../README.md](../README.md), оперативные правила — [../AGENTS.md](../AGENTS.md).
+
+> **Исполнители (с 2026-11):** боевые стадии ролей — Pi роль-паки через пакетный раннер (`scripts/package_runner.py`, стадии `pi:<роль>` в манифесте плана, ворота J63; исполнитель стадии сменный — `<исполнитель>:<роль>`, `scripts/executors/`, J65.5); пак переносит этот промпт на модель своего яруса (SA/архитектор/DEV/BA — glm-5.3, остальные — glm-5.3-flash; источник модели для раннера — `roles.json`). Оглавление паков и зоны `PI_ZONE_WRITE` — [../skills/pm-factory/pi/role-packs/README.md](../skills/pm-factory/pi/role-packs/README.md). Роли вне раннера запускаются `delegate_task` Hermes через flow-enforcer.
 
 ## Почему агентов именно столько
 
@@ -17,15 +17,19 @@
 
 ## Таблица зон записи (норма для всех ролей)
 
+Источник — реестр [`roles.json`](roles.json) (J65.1): там зоны записи в форме glob (политика ворот) и тексты этой таблицы. Правка зоны — только в реестре, затем `python3 scripts/gen_role_docs.py`; ручная правка таблицы ловится тестом.
+
+<!-- roles:zones:start -->
+<!-- генерируется scripts/gen_role_docs.py из agents/roles.json — руками не править -->
 | Агент | Режим | Зона записи (только она) | Push |
 |---|---|---|---|
 | Бизнес-аналитик | plan-write | `requirements.md`, `docs/ba/answers_roundN.md` | нет |
 | Системный аналитик | auto-edit | `openspec/changes/<id>/**` (вкл. requirements.md, research.md — решение 2026-10-05 ekotov-wiki), `sdd.md` | нет |
-| Разработчик | auto-edit | файлы своей задачи, чекбокс в `tasks.md`, своя ветка `feature/*` | своей ветки — да; main — нет |
+| Разработчик | auto-edit | файлы своей задачи, чекбокс в `tasks.md`, своя ветка `feature/*`; unit-тесты — только `tests/unit/**` (J66); код фабрики — `scripts/**`, `plugins/**` (J64.18) | своей ветки — да; main — нет |
 | Код-ревьюер | auto-edit | `code-reviews/<change-id>/review-*.md` | нет |
 | QA: автор кейсов | auto-edit | `test-model/new/<change-id>/` | нет |
 | QA: ревьюер кейсов | auto-edit | `test-model/reviews/`, перенос в `test-model/approved/` | нет |
-| QA: автоматизатор | auto-edit | `tests/**`, `test-model/bugs/`, dev-зависимости | нет |
+| QA: автоматизатор | auto-edit | `tests/api/**`, `tests/web/**`, `tests/integration/**`, `tests/smoke_cross/**`, `tests/archive/**`, общие `tests/conftest.py`, `tests/README.md`, `tests/__init__.py`, `tests/fixtures/**` (J66); `test-model/bugs/`, `pytest.ini` (J64.18), dev-зависимости | нет |
 | QA: impact-аналитик | auto-edit | `test-model/impact/<change-id>.md` | нет (роль создается при первом change с MODIFIED-дельтами, H5) |
 | QA: регресс-аналитик | auto-edit | `test-model/regression/manifest.md` | нет (роль создается при первом релизе, G5) |
 | Дизайнер UI | auto-edit | `design/**` проекта | нет (роль создается 2026-09-22 для R2/задачи 2.5, Д-5; мокапы и токены, продукт-код не пишет) |
@@ -35,6 +39,10 @@
 | Debug (эскалационный, 14-й) | auto-edit | только `docs/project-pitfalls.md` проекта (база граблей, append-only) | нет |
 | Regress-раннер (regress_runner, J51.4) | auto-edit | только `test-model/regress/<change-id>/` (артефакты прогонов пишет flowctl regress) | нет |
 | Основная сессия (relay) | plan | диалог с Заказчиком; запись не ведет (кроме PLAN-строк приема эскалаций по решению Заказчика) | нет |
+| Архитектор (J46) | auto-edit | `architecture/**` (карта архитектуры), ревью пакета `test-model/reviews/<change-id>/review-*-architecture.md` | нет |
+| DevOps (J26) | auto-edit | `deploy/**`, `ops/**`, CI-ворота `.github/workflows/**` (J64.18); боевой деплой — только по утверждению | нет |
+| Валидатор дизайна | auto-edit | `test-model/reviews/<change-id>/review-*-design.md` | нет |
+<!-- roles:zones:end -->
 
 Запись вне зоны = нарушение флоу; отчет отклоняется ПМ.
 
@@ -54,7 +62,7 @@
 **Зачем:** превращает требования в формальный контракт поведения (спека OpenSpec) и план реализации (tasks.md). Здесь требования становятся тестируемыми: каждый Requirement получает Scenario GIVEN/WHEN/THEN.
 
 - **Вход:** УТВЕРЖДЕННЫЙ `requirements.md` (+ answers-артефакты всех раундов).
-- **Выход:** `openspec/changes/<id>/` (proposal, дельты specs, design, tasks) + `sdd.md` (стек, API-контракты, модель данных — служебные эндпоинты обязательны) + **impact-карта (J58)**: `impact.md` в пакете (шаблон `openspec/changes/_template/impact.md`) или секция «## Impact» в design.md/proposal.md — затронутые сервисы / контракты / статика (static_v?) / deploy-матрица + RUNBOOK / миграции / тесты; пишется при create_change, до dev-задач.
+- **Выход:** `openspec/changes/<id>/` (proposal, дельты specs, design, tasks) + `sdd.md` (стек, API-контракты, модель данных — служебные эндпоинты обязательны) + **impact-карта (J58)**: `impact.md` в пакете (шаблон `templates/impact.template.md`) или секция «## Impact» в design.md/proposal.md — затронутые сервисы / контракты / статика (static_v?) / deploy-матрица + RUNBOOK / миграции / тесты; пишется при create_change, до dev-задач.
 - **Ключевые границы:** спека описывает наблюдаемое поведение, не реализацию; не начинает без УТВЕРЖДЕНО и без плана пакета (J41 — PLAN-файл пишет ПМ); не трогает чужие change-пакеты.
 - **Скиллы:** `openspec-authoring`, `service-decomposition` (границы сервисов, владение схемой, сквозные процессы, швы делегаций — при нарезке пакета), `requirements-elaboration` (трактовка ТЗ), `factory-flow`.
 - **Передает:** dev (задачи), qa_case_author (спека как прямой источник кейсов — remove-qa-checklist). После реализации — архивация дельт в master-spec (контракт 7).
@@ -67,7 +75,7 @@
 - **Выход:** код в ветке + PR (gh) + чекбокс задачи. Ревьюеру — процедура проверки в ТЗ.
 - **Ключевые границы:** спека — арбитр (расхождение = эскалация, не правка); не реализует вне tasks.md; не пишет QA-артефакты; push main запрещен.
 - **Принимает:** вердикт code_reviewer (approve → merge ПМ; return → доработка в той же ветке).
-- **Смежная зона:** изменения пайплайна (flow_check, flow.yml, scripts/) — тоже его зона; deploy/** и прод — сабагент devops (J26). Ворота **J50**: UI-дельта пакета ⇒ web-тесты в дифе PR или `[no-ui-tests]` с основанием.
+- **Смежная зона:** изменения пайплайна фабрики (flow_check, scripts/, plugins/) — тоже его зона; CI-workflows (`.github/workflows/**`), deploy/** и прод — сабагент devops (J26, J64.18); `pytest.ini` — автоматизатор. Ворота **J50**: UI-дельта пакета ⇒ web-тесты в дифе PR или `[no-ui-tests]` с основанием.
 
 ### 4. Код-ревьюер — [code_reviewer_agent.md](code_reviewer_agent.md)
 
@@ -99,7 +107,7 @@
 **Зачем:** превращает approved-кейсы в постоянный регрессионный набор — то, что гоняется перед каждым релизом и защищает от регрессий навсегда. Падение теста на корректном коде = баг-репорт, а не правка теста.
 
 - **Вход:** только approved-кейсы (контракт 6).
-- **Выход:** `tests/api/` (pytest+requests), `tests/web/` (Playwright) — селекторы дословно из кейсов, автожидания, sleep=0, TC-ID в docstring, метка `# regression: keep|candidate-archive` (G5); баг-репорты в `test-model/bugs/BUG-NNN`.
+- **Выход:** `tests/api/` (pytest+requests), `tests/web/` (Playwright), `tests/integration/` (без HTTP и браузера — проекты без API/UI; J66) — селекторы дословно из кейсов, автожидания, sleep=0, TC-ID в docstring, метка `# regression: keep|candidate-archive` (G5); баг-репорты в `test-model/bugs/BUG-NNN`.
 - **Ключевые границы:** не трогает код продукта; не подгоняет тест под сломанное поведение.
 
 ### 8. QA: impact-аналитик — [qa_impact_analyst_agent.md](qa_impact_analyst_agent.md) (создан по H5, в бою с Р4; с 2026-10-10 — J32-легкий: «Зоны воздействия», «Сквозные процессы», сверка плана прогонов)
@@ -131,7 +139,7 @@
 
 | Поле | Значение |
 |---|---|
-| Режим | auto-edit; зона `deploy/**` проекта, `ops/**` фабрики; push НЕТ |
+| Режим | auto-edit; зона `deploy/**` проекта, `ops/**` фабрики, `.github/workflows/**` (CI-ворота, J64.18); push НЕТ |
 | Запуск | Деплой/инфра-задачи (E9): runbook, deploy-скрипты, откаты |
 | Скиллы | `ekotov-wiki-ops` (проект wiki), `hermes-agent` (фабрика) |
 

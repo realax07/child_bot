@@ -161,14 +161,13 @@ REPO_ROOT = SCRIPTS.parent
 ROLE_PACKS = REPO_ROOT / "skills" / "pm-factory" / "pi" / "role-packs"
 WORKTREE_SCRIPT = SCRIPTS / "session_worktree.sh"
 FLOWCTL = Path(fc.__file__).resolve() if fc else SCRIPTS / "flowctl.py"
-# zone-guard исполнителя Pi (J64.10, решение Заказчика 2026-11-11 «Прямо из
-# репо»): эталон в репо движка (корень рядом с flowctl), не копия в ~/.pi;
-# pi запускается с --no-extensions, копия на стадии не грузится. Нет файла —
-# STOP стадии до ворот входа (раннер — FACTORY-ONLY; при запуске вне фабрики
-# без движка STOP дает FACTORY_ENGINE_MISSING).
-ZONE_GUARD_REL = Path("skills") / "pm-factory" / "pi" / "zone-guard.ts"
-ZONE_GUARD = FLOWCTL.parent.parent / ZONE_GUARD_REL
-ZONE_GUARD_MISSING = "ZONE_GUARD_MISSING"
+# Исполнители агентных стадий — scripts/executors/<имя>.py (J65.5): манифест
+# `run: <исполнитель>:<роль>`; ворота стадии раннер делает одинаково для любого
+# исполнителя. zone-guard pi (J64.10) — в исполнителе pi.
+import executors  # noqa: E402
+from executors import ExecutorUnavailable, StageLaunch  # noqa: E402
+MODEL_UNRESOLVED = "MODEL_UNRESOLVED"
+EXECUTOR_RUNS = "executor_runs.jsonl"
 # Ворота pi-стадии: владелец резервации в реестре сессий и область finish.
 FLOW_OWNER = "package_runner"
 FLOW_GATE_SCOPE = "post_agent"
@@ -177,8 +176,6 @@ FLOWCTL_TIMEOUT = 600
 COMMIT_EXCLUDE = ("SESSION.md",)
 REPORTS_SUFFIX = ".runner-reports"
 DEFAULT_TIMEOUT = 1800
-DEFAULT_PROVIDER = "zai-glm"
-DEFAULT_MODEL = "glm-5.3"
 DIAG_TAIL_LINES = 30
 STAGE_TAIL_LINES = 50
 JOURNAL_HEADER = "## Журнал раннера"
@@ -205,7 +202,9 @@ STAND_EXPORT_RE = re.compile(
     r"^[ \t]*export[ \t]+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.MULTILINE)
 STATE_SCHEMA = "package-runner-state/1"
 
-RUN_KINDS = ("pi", "hermes", "gate", "stand")
+# Виды стадий: agent — исполнитель запускает агента (pi:, stub:, …), manual —
+# стоп-точка ПМ (hermes:), gate/stand — команды раннера.
+SHELL_KINDS = ("gate", "stand")
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _FENCED_YAML_RE = re.compile(r"```yaml\s*\n(.*?)```", re.DOTALL)
 
@@ -435,31 +434,41 @@ def parse_manifest(plan_path: Path) -> dict:
         run = raw.get("run")
         if not isinstance(run, str) or ":" not in run:
             raise ManifestError(
-                f"{where}.run обязателен в виде pi:<роль> | hermes:<роль> | "
-                f"gate:<команда>; получено: {run!r}")
-        kind, _, payload = run.partition(":")
-        if kind not in RUN_KINDS:
-            raise ManifestError(
-                f"{where}.run: неизвестный вид {kind!r} "
-                f"(разрешены: {', '.join(k + ':' for k in RUN_KINDS)})")
+                f"{where}.run обязателен в виде <исполнитель>:<роль> (pi:, "
+                f"stub:, hermes:) | gate:<команда> | stand:<команда>; "
+                f"получено: {run!r}")
+        prefix, _, payload = run.partition(":")
+        executor = ""
+        if prefix in SHELL_KINDS:
+            kind = prefix
+        else:
+            try:
+                ex = executors.get(prefix)
+            except KeyError:
+                raise ManifestError(
+                    f"{where}.run: неизвестный исполнитель или вид {prefix!r} "
+                    f"(разрешены: {', '.join(k + ':' for k in (*executors.names(), *SHELL_KINDS))})"
+                ) from None
+            kind = "manual" if ex.manual else "agent"
+            executor = prefix
         payload = payload.strip()
         if not payload:
             raise ManifestError(f"{where}.run: пустой payload после "
-                                f"{kind}:")
-        if kind == "pi" and not ROLE_RE.fullmatch(payload):
+                                f"{prefix}:")
+        if kind == "agent" and not ROLE_RE.fullmatch(payload):
             # Роли — плоские каталоги роль-паков: без '/', без выхода наружу.
             raise ManifestError(
-                f"{where}.run: роль pi — идентификатор "
+                f"{where}.run: роль — идентификатор "
                 f"[A-Za-z0-9._-]+, получено: {payload!r}")
         zones = raw.get("zones") or []
-        if kind == "pi" and not zones and "zones" not in raw:
+        if kind == "agent" and not zones and "zones" not in raw:
             # J65.1: без zones — зона роли целиком из реестра agents/roles.json
             # ('*' — change-id пакета); зона манифеста ее только сужает.
             zones = policy_zones(payload, package)
             raw = {**raw, "zones": zones}
-        if kind == "pi" and not (isinstance(zones, list) and zones):
+        if kind == "agent" and not (isinstance(zones, list) and zones):
             raise ManifestError(
-                f"{where}.zones обязателен для pi-шага (список globs — "
+                f"{where}.zones обязателен для агентной стадии (список globs — "
                 "env PI_ZONE_WRITE роль-пака): у роли нет зоны в реестре "
                 "agents/roles.json или движок фабрики недоступен")
         for field in ("zones", "inputs", "depends"):
@@ -505,13 +514,14 @@ def parse_manifest(plan_path: Path) -> dict:
         if per_task is not None and not isinstance(per_task, bool):
             raise ManifestError(f"{where}.per_task: ожидается true/false, "
                                 f"получено: {per_task!r}")
-        if per_task and (kind != "pi" or flow_role(payload) != "dev"
+        if per_task and (kind != "agent" or flow_role(payload) != "dev"
                          or raw.get("task_id") or verdict is not None
                          or raw.get("optional")):
             # J64.13: развертка по задачам tasks.md — только pi:dev без своего
             # task_id, verdict и optional (ревью — парными под-стадиями).
             raise ManifestError(
-                f"{where}.per_task: только для pi:dev без task_id, verdict и optional")
+                f"{where}.per_task: только для агентной стадии роли dev "
+                "(pi:dev и т.п.) без task_id, verdict и optional")
         review_role = raw.get("review")
         if review_role is not None and not (
                 per_task and isinstance(review_role, str)
@@ -526,9 +536,19 @@ def parse_manifest(plan_path: Path) -> dict:
             raise ManifestError(
                 f"{where}.optional: ожидается true/false, "
                 f"получено: {optional!r}")
+        for key in ("provider", "model"):
+            val = raw.get(key)
+            if val is not None and (kind != "agent" or not isinstance(val, str)
+                                    or not val.strip()):
+                # J65.5: переопределение модели роли из реестра — на стадии
+                raise ManifestError(
+                    f"{where}.{key}: непустая строка, только у агентной стадии")
         stage = {
             "id": sid,
             "kind": kind,
+            "executor": executor,
+            "provider": (raw.get("provider") or "").strip(),
+            "model": (raw.get("model") or "").strip(),
             "payload": payload,
             "zones": [z.strip() for z in zones],
             "inputs": [x.strip() for x in (raw.get("inputs") or [])],
@@ -699,7 +719,7 @@ def record_review_provenance(plan_path: Path, worktree: Path, manifest: dict,
         if prev["id"] == stage["id"]:
             break
         g = gates.get(prev["id"])
-        if prev["kind"] != "pi" or not g:
+        if prev["kind"] != "agent" or not g:
             continue
         if prev.get("verdict"):
             authors = []  # предыдущее ревью закрыло свой отрезок работы
@@ -857,7 +877,9 @@ def expand_per_task(stage: dict, task_ids: list[str],
         last[tid] = dev["id"]
         if review:
             rev = {
-                "id": f"{stage['id']}-{tid}-review", "kind": "pi",
+                "id": f"{stage['id']}-{tid}-review", "kind": "agent",
+                "executor": stage.get("executor") or "pi",
+                "provider": "", "model": "",
                 "payload": review, "zones": policy_zones(review, package),
                 "inputs": [], "description": "",
                 "task": (f"ревью задачи tasks.md {tid} (дифф под-стадии {dev['id']}); "
@@ -957,7 +979,7 @@ def log_append(plan_path: Path, stage: dict, status: str,
     (<план>.runner.log): вывод успешных стадий тоже доступен после прогона
     (дефект пилота BUG-026: stdout/stderr терялись при успехе)."""
     header = (f"--- {utcnow_iso()} | stage {stage['id']} | "
-              f"{stage['kind']}:{stage['payload']} | {status} ---")
+              f"{run_label(stage)} | {status} ---")
     log = plan_path.parent / (plan_path.name + LOG_SUFFIX)
     with open(log, "a", encoding="utf-8") as f:
         f.write(header + "\n")
@@ -1027,17 +1049,38 @@ def ensure_worktree(repo: Path, session_id: str, branch: str) -> Path:
 # ------------------------------------------------------------------ pi
 
 
-def pi_provider_model(role: str) -> tuple[str, str]:
-    """Провайдер/модель роль-пака (settings.example.json: defaultProvider/
-    defaultModel); пака/полей нет — дефолт zai-glm/glm-5.3."""
-    settings = ROLE_PACKS / role / "settings.example.json"
-    try:
-        data = json.loads(settings.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return DEFAULT_PROVIDER, DEFAULT_MODEL
-    provider = data.get("defaultProvider") or DEFAULT_PROVIDER
-    model = data.get("defaultModel") or DEFAULT_MODEL
+def run_label(stage: dict) -> str:
+    """`run:` стадии как в манифесте: pi:dev, hermes:pm, gate:<команда>."""
+    return f"{stage.get('executor') or stage['kind']}:{stage['payload']}"
+
+
+def role_model(stage: dict) -> tuple[str, str] | None:
+    """Провайдер/модель агентной стадии (J65.5, решение Заказчика 2026-11-12
+    «roles.json + манифест»): ключи стадии `provider`/`model` поверх полей
+    роли в реестре agents/roles.json (роль — по роль-паку). Не определено —
+    None (STOP MODEL_UNRESOLVED; дефолтов в коде нет)."""
+    reg = {}
+    if rzp is not None:
+        reg = next((r for r in rzp.REGISTRY["roles"]
+                    if r.get("pack") == stage["payload"]), {})
+    provider = stage.get("provider") or reg.get("provider") or ""
+    model = stage.get("model") or reg.get("model") or ""
+    if not provider or not model:
+        return None
     return str(provider), str(model)
+
+
+def executor_runs_log(event: str, **fields) -> None:
+    """Журнал запусков исполнителей `<state>/executor_runs.jsonl` (J65.5):
+    вотчдог отличает запуск раннером от ручного. best-effort."""
+    path = flow_paths()[1].parent / EXECUTOR_RUNS
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": utcnow_iso(), "event": event, **fields},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def build_brief(manifest: dict, stage: dict,
@@ -1590,7 +1633,7 @@ def shelve_attempt(worktree: Path, base_sha: str, label: str) -> str:
                              f"--soft {base_sha[:12]}): "
                              f"{reset.stderr.strip() or reset.stdout.strip()}")
     excludes = [f":(exclude){p}"
-                for p in (*COMMIT_EXCLUDE, "AGENTS.pi.md")]
+                for p in (*COMMIT_EXCLUDE, *(f"AGENTS.{n}.md" for n in executors.names()))]
     proc = subprocess.run(
         ["git", "-C", str(worktree), "stash", "push", "-u", "-m", label,
          "--", ".", *excludes], capture_output=True, text=True)
@@ -1600,27 +1643,16 @@ def shelve_attempt(worktree: Path, base_sha: str, label: str) -> str:
     return "изменений нет" if "No local changes" in out else f"stash «{label}»"
 
 
-def zone_guard_log(package: str) -> Path:
-    """Лог отказов zone-guard — вне worktree (J64.10): в дифф стадии не
-    попадает и не путается с работой агента."""
-    return fp.state_dir() / "zone-guard" / f"{package}.log"
-
-
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def write_report(plan_path: Path, stage: dict, attempt: int,
-                 stdout: str, stderr: str, guard_sha: str = "") -> Path:
-    """Отчет агента для finish (указатель на файлы — хвост вывода pi)."""
+                 stdout: str, stderr: str, provenance: str = "") -> Path:
+    """Отчет агента для finish (указатель на файлы — хвост вывода исполнителя)."""
     rdir = plan_path.with_name(plan_path.name + REPORTS_SUFFIX)
     rdir.mkdir(parents=True, exist_ok=True)
     path = rdir / f"{stage['id']}-{attempt}.md"
     path.write_text(
-        f"# Отчет pi:{stage['payload']} — stage {stage['id']} "
+        f"# Отчет {run_label(stage)} — stage {stage['id']} "
         f"(попытка {attempt})\n\n"
-        + (f"zone-guard: {ZONE_GUARD_REL.as_posix()} sha256 {guard_sha}\n\n"
-           if guard_sha else "")
+        + (f"{provenance}\n\n" if provenance else "")
         + "## stdout\n\n```\n"
         f"{tail(stdout, STAGE_TAIL_LINES)}\n```\n\n## stderr\n\n```\n"
         f"{tail(stderr, STAGE_TAIL_LINES)}\n```\n", encoding="utf-8")
@@ -1662,8 +1694,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 except OSError:
                     pass
                 journal_append(plan_path, f"{utcnow_iso()} | stage "
-                               f"{stage['id']} | {stage['kind']}:"
-                               f"{stage['payload']} | STOP ({detail})")
+                               f"{stage['id']} | {run_label(stage)}"
+                               f" | STOP ({detail})")
             except OSError:
                 pass  # план удален/readonly — диагностика важнее state
         print(f"ЖДУ ПМ: STOP — {detail}", file=sys.stderr)
@@ -1693,8 +1725,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             except OSError:
                 pass
             journal_append(plan_path, f"{utcnow_iso()} | WARNING | stage "
-                           f"{stage['id']} | {stage['kind']}:"
-                           f"{stage['payload']} | SKIPPED (optional: "
+                           f"{stage['id']} | {run_label(stage)}"
+                           f" | SKIPPED (optional: "
                            f"{detail})")
         except OSError:
             pass  # план удален/readonly — диагностика важнее state
@@ -1754,7 +1786,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                   "пропуск)")
             continue
 
-        if stage["kind"] == "hermes":
+        if stage["kind"] == "manual":
             # Стоп-точка ПМ: статус «waited» (НЕ done) — при повторном
             # запуске после ПМ-действий stage считается обработанным и
             # пакет докатывается; диспатч и приемка — ручные.
@@ -1774,7 +1806,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 print(f"  worktree пакета (правки ПМ — коммитом в ветку "
                       f"{state.get('branch')}): {state['worktree']}")
             journal_append(plan_path, f"{utcnow_iso()} | stage "
-                           f"{stage['id']} | hermes:{stage['payload']} | "
+                           f"{stage['id']} | {stage['executor']}:{stage['payload']} | "
                            "ЖДУ ПМ (стоп-точка)")
             return 0
 
@@ -1818,7 +1850,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                              "approve-ревью зависимостей (J10); добавь `review: "
                              "code-reviewer` стадии", None)
             subs = expand_per_task(stage, ids, deps, manifest["package"])
-            empty = [s["id"] for s in subs if s["kind"] == "pi" and not s["zones"]]
+            empty = [s["id"] for s in subs if s["kind"] == "agent" and not s["zones"]]
             if empty:
                 return _stop(stage, "per_task: у роли ревьюера нет зоны в реестре "
                              "agents/roles.json: " + ", ".join(empty), None)
@@ -1944,13 +1976,20 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         if not role_agents.is_file():
             return _stop(stage, f"роль-пак не найден: {role_agents}", None)
         role_text = role_agents.read_text(encoding="utf-8")
-        guard_sha = ""
+        executor = executors.get(stage["executor"])
+        exec_prov: dict = {}
         if fc is not None:   # без движка STOP даст gate_new (FACTORY_ENGINE_MISSING)
-            if not ZONE_GUARD.is_file():
-                return _stop(stage, f"{ZONE_GUARD_MISSING}: zone-guard не найден "
-                                    f"({ZONE_GUARD}) — pi без guard'а роли не "
-                                    "запускается (J64.10)", None)
-            guard_sha = file_sha256(ZONE_GUARD)
+            try:
+                exec_prov = executor.preflight()
+            except ExecutorUnavailable as exc:
+                return _stop(stage, f"исполнитель {executor.name}: {exc}", None)
+        resolved = role_model(stage)
+        if resolved is None:
+            return _stop(stage, f"{MODEL_UNRESOLVED}: провайдер/модель роли "
+                         f"{stage['payload']} не заданы ни в agents/roles.json, "
+                         "ни в стадии манифеста (J65.5)", None)
+        provider, model = resolved
+        cleanup: list = []   # файлы раннера в worktree (роль) — уборка в _reject
 
         # Ворота входа (flowctl prepare/run или резервация зоны роли без
         # этапа). Повтор стадии после STOP сначала освобождает зону своей
@@ -1964,8 +2003,13 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         try:
             gate = gate_new(stage, repo, worktree)
             gate.update(open=True, attempt=attempt)
-            if guard_sha:   # аудит: какой guard стоял на попытке (J64.10)
-                gate["zone_guard_sha256"] = guard_sha
+            # аудит: исполнитель, модель и его provenance попытки (J64.10/J65.5)
+            gate.update(exec_prov, executor=executor.name, provider=provider,
+                        model=model)
+            gate["executor_ref"] = (
+                f"executor: {executor.name} ({provider}/{model})"
+                + (f"; zone-guard: {exec_prov['zone_guard_ref']}"
+                   if exec_prov.get("zone_guard_ref") else ""))
             gates[stage["id"]] = gate
             state_write(spath, state)  # до prepare: резервация не осиротеет
             gate_begin(manifest, stage, repo, worktree, branch, gate)
@@ -1987,7 +2031,8 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             в git stash, зона освобождается, skipped; обязательная — STOP,
             дерево и зона держатся до разбора ПМ/resume."""
             if stage.get("optional"):
-                agents_file.unlink(missing_ok=True)  # файл раннера — не в stash
+                for f in cleanup:   # файлы раннера — не в stash
+                    f.unlink(missing_ok=True)
                 try:
                     shelf = shelve_attempt(
                         worktree, gate.get("base_sha", ""),
@@ -2017,50 +2062,41 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
             state_write(spath, state)
             return _fail(stage, detail, exit_code, stdout, stderr)
 
-        # Роль-пак → AGENTS.md в корень worktree (а если там уже есть
-        # AGENTS.md проекта — рядом как AGENTS.pi.md, проектные правила не
-        # затираются; дефект пилота BUG-026). Файл раннера убирается после
-        # pi: в дифф/коммит стадии он не попадает.
-        agents_target = worktree / "AGENTS.md"
-        if agents_target.exists():
-            agents_file = worktree / "AGENTS.pi.md"
-            agents_file.write_text(
-                role_text + "\n---\n> Читай вместе с AGENTS.md проекта: "
-                "этот файл — ролевая инструкция Pi, проектные правила — "
-                "в AGENTS.md.\n", encoding="utf-8")
-        else:
-            agents_file = agents_target
-            agents_target.write_text(role_text, encoding="utf-8")
-        provider, model = pi_provider_model(stage["payload"])
-        env = dict(os.environ)
-        # Зоны — в префикс-форме guard'а: срез glob-хвостов (J61,
-        # дефект пилота BUG-026 — guard матчит префиксом, не glob'ом).
-        env["PI_ZONE_WRITE"] = ":".join(
-            normalize_zone(z) for z in stage["zones"])
-        # Роль — bash-правила guard'а (docker-мутации — только devops);
-        # лог отказов — вне worktree (J64.10).
-        env["PI_ZONE_ROLE"] = flow_role(stage["payload"])
-        env["PI_ZONE_GUARD_LOG"] = str(zone_guard_log(manifest["package"]))
-        # Env стенда stand-стадий пакета (J62) — всем последующим pi-стадиям.
-        env.update(stand_env)
-        args = ["pi", "--provider", provider, "--model", model,
-                # --no-extensions: автозагрузка расширений (~/.pi/agent/
-                # extensions, .pi/ проекта, settings.json) выключена — на
-                # стадии действует только эталон guard'а (ревью J64.10)
-                "--no-session", "--no-extensions", "-e", str(ZONE_GUARD),
-                "-p", build_brief(manifest, stage, agents_file.name)]
+        # Роль → рабочий каталог (AGENTS.md / AGENTS.<исполнитель>.md: файл
+        # проекта не затирается, BUG-026), команда исполнителя, запуск. Файлы
+        # раннера убираются после запуска — в дифф/коммит стадии не попадают.
+        agents_name, cleanup = executor.prepare_workdir(worktree, role_text)
+        launch = StageLaunch(
+            role=stage["payload"], flow_role=flow_role(stage["payload"]),
+            workdir=worktree, brief=build_brief(manifest, stage, agents_name),
+            # зоны — в префикс-форме guard'а: срез glob-хвостов (J61, BUG-026);
+            # исходные glob-зоны — для исполнителей со своей охраной (J65.5)
+            zones=[normalize_zone(z) for z in stage["zones"]],
+            zone_globs=list(stage["zones"]),
+            provider=provider, model=model, package=manifest["package"],
+            # env стенда stand-стадий пакета (J62) — всем последующим стадиям
+            env={**os.environ, **stand_env})
+        args, env = executor.command(launch)
+        executor_runs_log("start", executor=executor.name,
+                          delegation_id=gate.get("delegation_id"),
+                          package=manifest["package"], stage=stage["id"],
+                          workdir=str(worktree))
         try:
             rc, out, err = run_pi(args, worktree, env, timeout)
         except subprocess.TimeoutExpired as exc:
-            if _reject(f"таймаут pi ({timeout}с)", None,
+            if _reject(f"таймаут {executor.name} ({timeout}с)", None,
                        timeout_stream(exc.stdout),
                        timeout_stream(exc.stderr)):
                 return EXIT_STOP
             continue
         finally:
-            agents_file.unlink(missing_ok=True)
+            for f in cleanup:
+                f.unlink(missing_ok=True)
+            executor_runs_log("end", executor=executor.name,
+                              delegation_id=gate.get("delegation_id"),
+                              stage=stage["id"], workdir=str(worktree))
         if rc != 0:
-            if _reject(f"pi exit {rc}", rc, out, err):
+            if _reject(f"{executor.name} exit {rc}", rc, out, err):
                 return EXIT_STOP
             continue
         # Опциональный gate-этап стадии (после успешного pi; отказ — STOP).
@@ -2083,7 +2119,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         # ветку пакета и закрытие резервации.
         try:
             report = write_report(plan_path, stage, attempt, out, err,
-                                  gate.get("zone_guard_sha256", ""))
+                                  gate.get("executor_ref", ""))
         except OSError as exc:
             if _reject(f"отчет стадии не записан: {exc}", None, out, err):
                 return EXIT_STOP
@@ -2121,7 +2157,7 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
         try:
             commit = commit_stage(
                 worktree, f"[pipeline] {manifest['package']}/{stage['id']}: "
-                f"pi:{stage['payload']} (correlation {gate['cid']})")
+                f"{run_label(stage)} (correlation {gate['cid']})")
         except RunnerStop as exc:
             if _reject(str(exc), None, out, err):
                 return EXIT_STOP
@@ -2165,14 +2201,14 @@ def cmd_run(plan_path: Path, dry_run: bool) -> int:
                 return _stop(stage, str(exc), None)
             print(f"RUNNER: задача {stage['per_task_review']} закрыта в tasks.md "
                   f"({closed_commit or 'уже закрыта'})")
-        state_record(state, stage["id"], "done", "pi ok", 0, out, err)
+        state_record(state, stage["id"], "done", f"{stage['executor']} ok", 0, out, err)
         state_write(spath, state)
         try:
             log_append(plan_path, stage, "ok", out, err)
         except OSError:
             pass
         journal_append(plan_path, f"{utcnow_iso()} | stage {stage['id']} | "
-                       f"pi:{stage['payload']} | ok")
+                       f"{run_label(stage)} | ok")
         done.add(stage["id"])
 
     # J64.14: пакет докатан — gc может снести worktree (маркер пакета).

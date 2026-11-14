@@ -5,7 +5,7 @@
 переопределяется переменной окружения. Перенос фабрики на другую машину
 или под другого пользователя = задать env, а не править скрипты.
 
-Пути делятся на четыре вида — у каждого свой смысл и своя переменная:
+Пути делятся на несколько видов — у каждого свой смысл и своя переменная:
 
 | Функция            | Что это                                   | env                | Дефолт            |
 |--------------------|-------------------------------------------|--------------------|-------------------|
@@ -16,6 +16,7 @@
 | `factory_home()`   | где лежит репозиторий фабрики             | `AI_FACTORY_HOME`  | `~/ai-factory`    |
 | `projects_root()`  | где лежат проекты (`<root>/<project>`)    | `AF_PROJECTS_ROOT` | `~`               |
 | `pi_agent_dir()`   | конфиг исполнителя Pi (models, extensions)| `PI_AGENT_DIR`     | `~/.pi/agent`     |
+| `backup_dir()`     | архивы state (state_backup.py, J64.6)     | `AF_BACKUP_DIR`    | `~/ai-factory-backups` |
 
 `state_dir()` по умолчанию — `~/.hermes/state` (историческое место: фабрика
 выросла на Hermes), но от `HERMES_HOME` он НЕ зависит: память движка общая
@@ -78,6 +79,13 @@ def pi_agent_dir() -> Path:
     return _env_path("PI_AGENT_DIR", Path.home() / ".pi" / "agent")
 
 
+def backup_dir() -> Path:
+    """Архивы state движка (state_backup.py, J64.6). Дефолт — вне state_dir:
+    удаление/порча state не уносит бэкапы; для потери машины целиком архив
+    копируется вне VPS (RUNBOOK переноса)."""
+    return _env_path("AF_BACKUP_DIR", Path.home() / "ai-factory-backups")
+
+
 def describe() -> dict[str, str]:
     """Текущие пути (для диагностики: `python3 scripts/factory_paths.py`)."""
     return {
@@ -88,6 +96,7 @@ def describe() -> dict[str, str]:
         "factory_home": str(factory_home()),
         "projects_root": str(projects_root()),
         "pi_agent_dir": str(pi_agent_dir()),
+        "backup_dir": str(backup_dir()),
     }
 
 
@@ -99,7 +108,7 @@ def describe() -> dict[str, str]:
 # видят другой реестр».
 
 DOCTOR_ENV = ("HOME", "HERMES_HOME", "AF_STATE_DIR", "AI_FACTORY_HOME",
-              "AF_PROJECTS_ROOT", "PI_AGENT_DIR", "FLOW_MODE_FILE",
+              "AF_PROJECTS_ROOT", "PI_AGENT_DIR", "AF_BACKUP_DIR", "FLOW_MODE_FILE",
               "FLOW_ENFORCER_STATE_DIR", "PYTHONUSERBASE")
 
 

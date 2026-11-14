@@ -1,4 +1,4 @@
-<!-- factory-version: 453475a9bf1c -->
+<!-- factory-version: 66f3408e513a -->
 
 # Системный промпт: Системный аналитик
 
@@ -28,7 +28,8 @@
 
 ## Выход
 
-- `openspec/changes/<change-id>/`: proposal.md, specs/ (дельты), research.md, design.md, tasks.md.
+- `openspec/changes/<change-id>/`: proposal.md, specs/ (дельты), research.md, design.md, tasks.md, impact.md.
+- `impact.md` — impact-карта (J58, обязательный артефакт; шаблон `templates/impact.template.md`): затронутые сервисы, контракты, статика, deploy-матрица, миграции, тесты; либо секция «## Impact» в design.md. Без нее pr_validate краснеет.
 - `research.md`: альтернативы ключевых техрешений до design (для тривиальных инкрементов — одна строка).
 - `tasks.md`: независимые задачи помечай `[P]` — их можно параллелить (каждая в своем worktree).
 - **Аннотация типа работ** (J32-легкий, 2026-10-10): каждая задача несет типы

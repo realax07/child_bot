@@ -1,6 +1,6 @@
 {
   "schema": "roles/1",
-  "comment": "Единый реестр ролей (J65.1): зоны записи (политика ворот), строки таблицы зон agents/README.md и оглавление роль-паков генерируются из этого файла (scripts/gen_role_docs.py). Правка зон — только здесь. <id> в зоне — сегмент change-id пакета (для ворот — '*', раннер подставляет id пакета); '*' — обычная маска glob.",
+  "comment": "Единый реестр ролей (J65.1): зоны записи (политика ворот), строки таблицы зон agents/README.md и оглавление роль-паков генерируются из этого файла (scripts/gen_role_docs.py). Правка зон — только здесь. <id> в зоне — сегмент change-id пакета (для ворот — '*', раннер подставляет id пакета); '*' — обычная маска glob. provider/model — модель роли для агентных стадий раннера (J65.5): стадия манифеста переопределяет ключами provider/model.",
   "roles": [
     {
       "id": "ba",
@@ -13,6 +13,8 @@
         "docs/ba/*"
       ],
       "pack": "ba",
+      "provider": "zai-glm",
+      "model": "glm-5.3",
       "prompt": "agents/ba_agent.md",
       "in_table": true
     },
@@ -33,6 +35,8 @@
         "sdd.md"
       ],
       "pack": "sa",
+      "provider": "zai-glm",
+      "model": "glm-5.3",
       "prompt": "agents/sa_agent.md",
       "in_table": true
     },
@@ -57,6 +61,8 @@
         "plugins/**"
       ],
       "pack": "dev",
+      "provider": "zai-glm",
+      "model": "glm-5.3",
       "prompt": "agents/dev_agent.md",
       "in_table": true
     },
@@ -70,6 +76,8 @@
         "code-reviews/<id>/review-*.md"
       ],
       "pack": "code-reviewer",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/code_reviewer_agent.md",
       "in_table": true,
       "pack_note": "вердикт — заголовком `## Вердикт: approve|return` (J65.4)"
@@ -84,6 +92,8 @@
         "test-model/new/<id>/**"
       ],
       "pack": "qa-case-author",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/qa_case_author_agent.md",
       "in_table": true
     },
@@ -98,6 +108,8 @@
         "test-model/approved/**"
       ],
       "pack": "qa-case-reviewer",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/qa_case_reviewer_agent.md",
       "in_table": true,
       "pack_note": "append-only партии"
@@ -122,6 +134,8 @@
         "pytest.ini"
       ],
       "pack": "qa-automation",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/qa_automation_agent.md",
       "in_table": true
     },
@@ -135,6 +149,8 @@
         "test-model/impact/*.md"
       ],
       "pack": "qa-impact-analyst",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/qa_impact_analyst_agent.md",
       "in_table": true
     },
@@ -161,6 +177,8 @@
         "design/**"
       ],
       "pack": "ui-designer",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/ui_designer_agent.md",
       "in_table": true
     },
@@ -215,11 +233,15 @@
       "mode": "auto-edit",
       "zone_text": "только `docs/project-pitfalls.md` проекта (база граблей, append-only)",
       "push": "нет",
-      "zones": [],
+      "zones": [
+        "docs/project-pitfalls.md"
+      ],
       "pack": "debug",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/debug_agent.md",
       "in_table": true,
-      "pack_note": "диагностика без правки продукта; вердикт СРЕДА/КОД/ТЕСТ; зоны политики нет — развилка J64.11"
+      "pack_note": "диагностика без правки продукта; вердикт СРЕДА/КОД/ТЕСТ; запись — только база граблей (J64.11, решение Заказчика 2026-11-10)"
     },
     {
       "id": "regress_runner",
@@ -231,6 +253,8 @@
         "test-model/regress/<id>/**"
       ],
       "pack": "regress-runner",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/regress_runner_agent.md",
       "in_table": true,
       "pack_note": "артефакты прогонов пишет flowctl regress"
@@ -258,6 +282,8 @@
         "test-model/reviews/<id>/review-*-architecture.md"
       ],
       "pack": "architect",
+      "provider": "zai-glm",
+      "model": "glm-5.3",
       "prompt": "agents/architect_agent.md",
       "in_table": true
     },
@@ -273,6 +299,8 @@
         ".github/workflows/**"
       ],
       "pack": "devops",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/devops_agent.md",
       "in_table": true,
       "pack_note": "боевой деплой — только по утверждению ПМ, hermes-стоп"
@@ -287,6 +315,8 @@
         "test-model/reviews/<id>/review-*-design.md"
       ],
       "pack": "design-validator",
+      "provider": "zai-glm",
+      "model": "glm-5.3-flash",
       "prompt": "agents/design_validator_agent.md",
       "in_table": true
     },
@@ -326,7 +356,7 @@
       "prompt": null,
       "in_table": false,
       "pack_note": "read-only guard, ручной вызов ПМ; модель — флагами CLI поверх settings.example.json",
-      "model": "kimi k3.1-pro",
+      "model": "k3.1-pro",
       "provider": "kimi"
     }
   ]

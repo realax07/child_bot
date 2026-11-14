@@ -71,7 +71,15 @@ def load(path):
 
 def load_delegations() -> list[dict] | None:
     """Все делегации из async_delegations (пишется платформой при каждом
-    delegate_task — независимо от воли агента)."""
+    delegate_task — независимо от воли агента). Источник — исполнитель hermes
+    (scripts/executors/hermes.py, J65.5); копия в проекте без пакета
+    исполнителей читает реестр сама (ниже)."""
+    try:
+        from executors import hermes as _hermes
+    except ImportError:
+        _hermes = None
+    if _hermes is not None:
+        return _hermes.EXECUTOR.delegations(REGISTRY_DB)
     import sqlite3
     if not REGISTRY_DB.exists():
         return None
@@ -188,12 +196,32 @@ def _scan(delegations, flow, gated_map=None, baseline=None, now=None):
     return bypasses, stale
 
 
+def executor_bypasses() -> list[dict]:
+    """J65.5: обход исполнителей-процессов (pi, stub, …) — запуск вне живой
+    резервации (executor_watchdog). Копия в проекте без пакета исполнителей —
+    пусто (вотчдог работает экземпляром фабрики)."""
+    try:
+        import executor_watchdog
+    except ImportError:
+        return []
+    try:
+        registry, journal = executor_watchdog.default_paths()
+        return executor_watchdog.scan(registry, journal)
+    except Exception as exc:   # сломанный исполнитель не роняет сверку Hermes
+        print(f"WARN: сверка исполнителей не выполнена ({exc!r})", file=sys.stderr)
+        return []
+
+
 def main() -> int:
+    proc_bypasses = executor_bypasses()
     delegations = load_delegations()
     flow = load(FLOWCTL_STATE)
     if delegations is None or flow is None:
-        print("clean: реестры недоступны/пусты — сверка невозможна")
-        return 0
+        if not proc_bypasses:
+            print("clean: реестры недоступны/пусты — сверка невозможна")
+            return 0
+        # Hermes на машине нет — сверяются только исполнители-процессы
+        delegations, flow = [], flow or {"runs": {}}
 
     # Платформенные id, диспатченные через ворота (маппинг ведет ПМ после
     # диспатча — см. GATED_MAP_STATE): эквивалентны gated. Значение map —
@@ -202,6 +230,7 @@ def main() -> int:
 
     bypasses, stale = _scan(delegations, flow, gated_map=gated_map,
                             baseline=load(_baseline_path()))
+    bypasses += proc_bypasses
 
     report = {"checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "bypass": bypasses, "stale_finish": stale}

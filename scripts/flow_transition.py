@@ -890,8 +890,7 @@ def _approval_finding(action: ActionRequest, scope: dict, stage_name: str,
             f"действие «{stage_name}» требует зафиксированного решения Заказчика "
             f"(дословная фиксация; «ПМ считает согласованным» решением не является; "
             f"формат: запись в журнале решений decisions/<YYYY-MM-DD>-<slug>.md, "
-            f"decision_id в approval_ref; контракт §10; AGENTS.md «Этапные "
-            f"ворота Заказчика»)")
+            f"decision_id в approval_ref; контракт §10; AGENTS.md п.18)")
     if isinstance(ref, str):
         if repo is None:
             # Журнал не передан (чистый вызов без контекста репо) — проверить

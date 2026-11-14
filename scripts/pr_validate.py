@@ -157,6 +157,7 @@ def check_change(repo: Path, change_id: str, marker: str = "") -> list[str]:
     import sqlite3 as _sq
     _db = fp.hermes_home() / "state.db"
     _dev_delegs: set = set()
+    _fstate: dict = {}
     try:
         import json as _json
         _fstate = _json.loads(fp.flowctl_state_path().read_text(encoding="utf-8"))
@@ -186,6 +187,13 @@ def check_change(repo: Path, change_id: str, marker: str = "") -> list[str]:
                 _c.close()
                 _exists = _row is not None
                 _ok = _exists and _row[0] in ("completed",) and _rd not in _dev_delegs
+                if not _exists:
+                    # J65.4b: ревью стадии Pi пакетного раннера — делегации
+                    # нет в реестре Hermes, доказательство — запись цикла
+                    # flowctl раннера (роль code_reviewer, тот же change,
+                    # стадия принята и закоммичена раннером, ≠ автор).
+                    _exists = _ok = runner_review_ok(_rd, change_id, _fstate,
+                                                     _dev_delegs)
             except _sq.Error:
                 _exists = _ok = True
             if not _ok:
@@ -307,6 +315,34 @@ def _has_design_artifacts(repo: Path, change_id: str) -> bool:
 
 
 REGRESS_FINAL_MAX_AGE_DAYS = 7
+
+
+RUNNER_REVIEW_STATUSES = ("accepted", "provisional")
+
+
+def runner_review_ok(delegation: str, change_id: str, fstate: dict,
+                     dev_delegs: set) -> bool:
+    """J65.4b: независимость ревью стадии Pi по реестру циклов flowctl.
+
+    Засчитывается, если в flowctl_state есть запись с этой делегацией:
+    роль code_reviewer, scope.change = change PR, статус accepted или
+    provisional (pr_validate стадии отложен до PR), пометка package_runner
+    (стадия прошла ворота выхода и закоммичена раннером; вердикт-ворота идут
+    после — STALE/return-вердикт J10 отсеивает своим парсером вердикта) — и
+    делегация не совпадает с делегацией задачи разработчика (SELF_REVIEW)."""
+    norm = delegation.replace("-", "_")
+    if norm in dev_delegs:
+        return False
+    for rec in (fstate.get("runs") or {}).values():
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("delegation_id") or "").replace("-", "_") != norm:
+            continue
+        return (rec.get("actor_role") == "code_reviewer"
+                and (rec.get("scope") or {}).get("change") == change_id
+                and rec.get("status") in RUNNER_REVIEW_STATUSES
+                and isinstance(rec.get("package_runner"), dict))
+    return False
 
 
 def check_regress_final(repo: Path, change_id: str) -> list[str]:

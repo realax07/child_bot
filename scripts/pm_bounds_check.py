@@ -141,6 +141,14 @@ def check_commit(repo: Path, commit: str) -> list[str]:
     return problems
 
 
+# Завершенные записи реестра (зона снята: принята и закрыта / освобождена) —
+# история, в проверку повтора пары не идут. Перечисляются именно они, а не
+# живые: запись с неизвестным или пустым статусом остается в проверке
+# (fail-closed; ревью J65.10 review-001). Ни один из них не держит зону
+# (session_check.ZONE_HOLDING) — тест TC-J65-REF-005.
+FINISHED_STATUSES = ("closed", "released")
+
+
 def check_sessions(path: Path) -> list[str]:
     problems: list[str] = []
     if not path.exists():
@@ -152,12 +160,18 @@ def check_sessions(path: Path) -> list[str]:
 
     seen: dict[tuple[str, str], str] = {}
     for i, s in enumerate(data.get("sessions", [])):
+        live = s.get("status") not in FINISHED_STATUSES
         label = f"sessions[{i}] ({s.get('delegation_id', '?')})"
         for field in REQUIRED_SESSION_FIELDS:
             if not s.get(field):
                 problems.append(f"{label}: отсутствует обязательное поле '{field}' (J2)")
         project, owner = s.get("project", ""), s.get("owner_pm", "")
-        if project and owner:
+        # Повтор пары — только среди живых записей (J65.10): закрытая или
+        # освобожденная сессия — история, не второй ПМ проекта. Раньше
+        # пакетный раннер (owner_pm=package_runner на все стадии) получал
+        # FAIL на finish dev-стадии, если до нее в проекте закрылась любая
+        # другая стадия. Запись без status (формат J2) — живая.
+        if project and owner and live:
             key = (project, owner)
             if key in seen and seen[key] != s.get("delegation_id"):
                 problems.append(

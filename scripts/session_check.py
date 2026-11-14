@@ -110,14 +110,6 @@ def change_id_problem(change_id: str) -> str | None:
             "без слэшей и '..'")
 
 
-def _fnmatch_segments(pattern: str, path: str) -> bool:
-    """fnmatch посегментно: '*' внутри сегмента не переходит через '/'."""
-    psegs, usegs = pattern.split("/"), path.split("/")
-    if len(psegs) != len(usegs):
-        return False
-    return all(fnmatch.fnmatchcase(u, p) for p, u in zip(psegs, usegs))
-
-
 def glob_matches(pattern: str, rel: str) -> bool:
     """Glob-семантика зон (тесты ТЗ 04: вложенные пути, префиксы, symlink).
 
@@ -132,32 +124,37 @@ def glob_matches(pattern: str, rel: str) -> bool:
     path = canonical(rel)
     if not pat or not path:
         return False
-    if pat == "**":
-        return True
     if any(ch in pat for ch in "*?["):
-        if _fnmatch_segments(pat, path):
-            return True
-        if pat.endswith("/**") and (
-            path == pat[:-3] or path.startswith(pat[:-3] + "/")
-        ):
-            return True
-        if "**/" in pat or "/**" in pat:
-            head, _, tail = pat.partition("**")
-            # '**' → любое число сегментов (включая ноль).
-            head_prefix = head.rstrip("/")
-            if head_prefix and not (
-                path == head_prefix or path.startswith(head_prefix + "/")
-            ):
-                return False
-            rest = path[len(head_prefix):].lstrip("/")
-            tail_seg = tail.lstrip("/")
-            if not tail_seg:
-                return True
-            return any(
-                _fnmatch_segments(tail_seg, "/".join(rest.split("/")[n:]))
-                for n in range(len(rest.split("/")) + 1)
-            )
-        return False
+        # Посегментная рекурсия (та же семантика, что _pattern_matches_pattern):
+        # '**' — любое число сегментов, включая ноль; '*', '?', '[...]' —
+        # внутри одного сегмента. Прежняя реализация сравнивала префикс перед
+        # '**' буквально: 'openspec/changes/*/specs/**' не матчил
+        # 'openspec/changes/x/specs/a/spec.md' (СА не мог запросить конкретный
+        # spec.md — ревью J65.10 review-002), а 'a/**/*' матчил сам 'a'.
+        usegs = path.split("/")
+        # путь с '..', '.' или пустым сегментом зоной не матчится (canonical
+        # их не схлопывает; ревью glob-matches review-001)
+        if any(u in ("", ".", "..") for u in usegs):
+            return False
+        psegs: list[str] = []
+        for seg in pat.split("/"):
+            if seg and not (seg == "**" and psegs and psegs[-1] == "**"):
+                psegs.append(seg)   # '//' и подряд '**' схлопываются
+        memo: dict[tuple[int, int], bool] = {}
+
+        def rec(i: int, j: int) -> bool:   # O(|pat|·|path|) с memo
+            key = (i, j)
+            if key not in memo:
+                if i == len(psegs):
+                    memo[key] = j == len(usegs)
+                elif psegs[i] == "**":
+                    memo[key] = rec(i + 1, j) or (j < len(usegs) and rec(i, j + 1))
+                else:
+                    memo[key] = (j < len(usegs)
+                                 and fnmatch.fnmatchcase(usegs[j], psegs[i])
+                                 and rec(i + 1, j + 1))
+            return memo[key]
+        return rec(0, 0)
     return path == pat or path.startswith(pat + "/")
 
 def zone_holds(zone_patterns: list, rel: str) -> bool:
@@ -416,6 +413,11 @@ def git_main_root(repo: Path) -> str | None:
         common = Path(out.strip())
         if common.name == ".git":
             return str(common.parent)
+        # J64.14: bare-репозиторий (или --separate-git-dir) — common-dir не
+        # `.git`; общий для всех worktree ключ — сам common-dir (откат к
+        # toplevel давал каждому worktree свой «репозиторий» и ломал ZONE_CONFLICT).
+        if common.is_dir() and (common / "HEAD").is_file():
+            return str(common)
     return git_toplevel(repo)
 
 
